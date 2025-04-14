@@ -13,12 +13,59 @@ from ticket_service import TicketService
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-# Environment configuration
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
+# Add this near the top of lambda_function.py
+def get_secrets():
+    """Retrieve secrets from AWS Secrets Manager"""
+    import boto3
+    import json
+    
+    secret_name = "ai-incident-response-secrets"
+    region_name = os.environ.get("AWS_REGION", "us-east-1")
+    
+    # Create a Secrets Manager client
+    session = boto3.session.Session()
+    client = session.client(
+        service_name='secretsmanager',
+        region_name=region_name
+    )
+    
+    try:
+        get_secret_value_response = client.get_secret_value(
+            SecretId=secret_name
+        )
+    except Exception as e:
+        logger.error(f"Error retrieving secrets: {str(e)}")
+        # Return empty dict as fallback
+        return {}
+    
+    # Decrypts secret using the associated KMS key if it exists
+    if 'SecretString' in get_secret_value_response:
+        secret = get_secret_value_response['SecretString']
+        return json.loads(secret)
+    else:
+        logger.error("Secret is in binary format, not supported")
+        return {}
+
+# Load secrets on module initialization
+try:
+    secrets = get_secrets()
+except Exception as e:
+    logger.warning(f"Could not load secrets, using fallbacks: {str(e)}")
+    secrets = {}
+
+# Environment configuration - now using secrets with fallbacks
+ANTHROPIC_API_KEY = secrets.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
+VCS_TYPE = os.environ.get("VCS_TYPE", "github")
+VCS_TOKEN = secrets.get("VCS_TOKEN") or os.environ.get("VCS_TOKEN")
+VCS_EXTRA_PARAMS = json.loads(secrets.get("VCS_EXTRA_PARAMS", "{}")) or json.loads(os.environ.get("VCS_EXTRA_PARAMS", "{}"))
 OPENSEARCH_ENDPOINT = os.environ.get("OPENSEARCH_ENDPOINT")
-S3_BUCKET = os.environ.get("S3_BUCKET")
 ENABLE_APM_TOOLS = os.environ.get("ENABLE_APM_TOOLS", "true").lower() == "true"
-NOTIFICATION_WEBHOOK = os.environ.get("NOTIFICATION_WEBHOOK")
+APM_TYPE = os.environ.get("APM_TYPE", "dynatrace")
+APM_API_KEY = secrets.get("APM_API_KEY") or os.environ.get("APM_API_KEY")
+APM_EXTRA_PARAMS = json.loads(secrets.get("APM_EXTRA_PARAMS", "{}")) or json.loads(os.environ.get("APM_EXTRA_PARAMS", "{}"))
+TICKET_TYPE = os.environ.get("TICKET_TYPE", "jira")
+TICKET_PARAMS = json.loads(secrets.get("TICKET_PARAMS", "{}")) or json.loads(os.environ.get("TICKET_PARAMS", "{}"))
+NOTIFICATION_WEBHOOK = secrets.get("NOTIFICATION_WEBHOOK") or os.environ.get("NOTIFICATION_WEBHOOK")
 
 def lambda_handler(event, context):
     """Main Lambda handler"""
