@@ -82,7 +82,10 @@ def lambda_handler(event, context):
             api_key=APM_API_KEY, 
             **APM_EXTRA_PARAMS
         ) if ENABLE_APM_TOOLS else None
-        ticket_service = TicketService()
+        ticket_service = TicketService(
+        ticket_type=TICKET_TYPE,
+        **TICKET_PARAMS  # Pass the Jira configuration
+        )
         
         # Extract problem information
         problem_info = extract_problem_info(event)
