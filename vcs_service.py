@@ -1,24 +1,46 @@
+# vcs_service.py
 import requests
 import json
 import base64
 import os
+import logging
 from typing import Dict, List, Optional, Any
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
 
 class VCSService:
     def __init__(self, vcs_type=None, token=None, **kwargs):
-        self.vcs_type = vcs_type or os.environ.get("VCS_TYPE", "github")
+        """
+        Initialize VCS service based on environment variables
+        
+        Args:
+            vcs_type: The type of VCS provider (github, bitbucket, ado, gitlab)
+            token: Authentication token
+            **kwargs: Additional provider-specific parameters
+        """
+        # Get configuration from params or environment variables
+        self.vcs_type = vcs_type or os.environ.get("VCS_TYPE", "github").lower()
         self.token = token or os.environ.get("VCS_TOKEN")
         self.extra_params = kwargs or json.loads(os.environ.get("VCS_EXTRA_PARAMS", "{}"))
         
-        # Initialize based on VCS type
+        # Force lowercase for consistent matching
+        self.vcs_type = self.vcs_type.lower()
+        
+        # Add VCS provider name logging
+        logger.info(f"Initializing VCS service for provider: {self.vcs_type}")
+        
+        # Initialize provider-specific clients and settings
         if self.vcs_type == "github":
             self._init_github()
-        elif self.vcs_type == "ado":
+        elif self.vcs_type in ["ado", "azure", "azuredevops"]:
             self._init_ado()
         elif self.vcs_type == "bitbucket":
             self._init_bitbucket()
+        elif self.vcs_type == "gitlab":
+            self._init_gitlab()
         else:
-            raise ValueError(f"Unsupported VCS type: {self.vcs_type}")
+            raise ValueError(f"Unsupported VCS provider type: {self.vcs_type}")
     
     def _init_github(self):
         """Initialize GitHub client"""
@@ -27,6 +49,8 @@ class VCSService:
             "Authorization": f"token {self.token}",
             "Accept": "application/vnd.github.v3+json"
         })
+        self.api_base_url = "https://api.github.com"
+        logger.info("GitHub client initialized")
     
     def _init_ado(self):
         """Initialize Azure DevOps client"""
@@ -34,7 +58,7 @@ class VCSService:
         self.project = self.extra_params.get("project")
         
         if not self.organization or not self.project:
-            raise ValueError("ADO requires 'organization' and 'project' parameters")
+            raise ValueError("Azure DevOps requires 'organization' and 'project' parameters in VCS_EXTRA_PARAMS")
         
         auth = base64.b64encode(f":{self.token}".encode()).decode()
         self.session = requests.Session()
@@ -42,98 +66,268 @@ class VCSService:
             "Authorization": f"Basic {auth}",
             "Content-Type": "application/json"
         })
+        self.api_base_url = f"https://dev.azure.com/{self.organization}/{self.project}"
+        logger.info(f"Azure DevOps client initialized for org: {self.organization}, project: {self.project}")
     
     def _init_bitbucket(self):
         """Initialize Bitbucket client"""
         self.workspace = self.extra_params.get("workspace")
         
         if not self.workspace:
-            raise ValueError("Bitbucket requires 'workspace' parameter")
+            raise ValueError("Bitbucket requires 'workspace' parameter in VCS_EXTRA_PARAMS")
         
         self.session = requests.Session()
         self.session.headers.update({
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json"
         })
+        self.api_base_url = "https://api.bitbucket.org/2.0"
+        logger.info(f"Bitbucket client initialized for workspace: {self.workspace}")
     
-    def get_repository_files(self, repo: str, ref: str = "main") -> List[str]:
-        """Get list of files in the repository"""
-        if self.vcs_type == "github":
-            return self._github_get_files(repo, ref)
-        elif self.vcs_type == "ado":
-            return self._ado_get_files(repo, ref)
-        elif self.vcs_type == "bitbucket":
-            return self._bitbucket_get_files(repo, ref)
+    def _init_gitlab(self):
+        """Initialize GitLab client"""
+        self.gitlab_url = self.extra_params.get("gitlab_url", "https://gitlab.com")
+        
+        self.session = requests.Session()
+        self.session.headers.update({
+            "Private-Token": self.token
+        })
+        self.api_base_url = f"{self.gitlab_url}/api/v4"
+        logger.info(f"GitLab client initialized, API URL: {self.api_base_url}")
     
-    def get_file_content(self, repo: str, path: str, ref: str = "main") -> str:
-        """Get content of a file from the repository"""
-        if self.vcs_type == "github":
-            return self._github_get_content(repo, path, ref)
-        elif self.vcs_type == "ado":
-            return self._ado_get_content(repo, path, ref)
-        elif self.vcs_type == "bitbucket":
-            return self._bitbucket_get_content(repo, path, ref)
+    def authenticate(self) -> bool:
+        """Test authentication with the VCS provider"""
+        try:
+            if self.vcs_type == "github":
+                response = self.session.get(f"{self.api_base_url}/user")
+                return response.status_code == 200
+                
+            elif self.vcs_type in ["ado", "azure", "azuredevops"]:
+                response = self.session.get(f"{self.api_base_url}/_apis/projects?api-version=6.0")
+                return response.status_code == 200
+                
+            elif self.vcs_type == "bitbucket":
+                response = self.session.get(f"{self.api_base_url}/workspaces/{self.workspace}")
+                return response.status_code == 200
+                
+            elif self.vcs_type == "gitlab":
+                response = self.session.get(f"{self.api_base_url}/user")
+                return response.status_code == 200
+                
+            return False
+        except Exception as e:
+            logger.error(f"Authentication error: {str(e)}")
+            return False
     
-    def create_branch(self, repo: str, branch_name: str, base_ref: str = "main") -> bool:
-        """Create a new branch"""
-        if self.vcs_type == "github":
-            return self._github_create_branch(repo, branch_name, base_ref)
-        elif self.vcs_type == "ado":
-            return self._ado_create_branch(repo, branch_name, base_ref)
-        elif self.vcs_type == "bitbucket":
-            return self._bitbucket_create_branch(repo, branch_name, base_ref)
+    def get_repository_files(self, repo: str, ref: str = None) -> List[str]:
+        """
+        Get list of files in the repository
+        
+        Args:
+            repo: Repository identifier (e.g., "owner/repo")
+            ref: Branch/tag reference (if None, uses default branch)
+        
+        Returns:
+            List of file paths
+        """
+        # If ref is not provided, use environment variable or fall back to 'main'
+        if ref is None:
+            ref = os.environ.get("REPO_DEFAULT_BRANCH", "main")
+            
+        logger.info(f"Getting repository files for {repo}, ref: {ref}")
+        
+        try:
+            if self.vcs_type == "github":
+                return self._github_get_files(repo, ref)
+            elif self.vcs_type in ["ado", "azure", "azuredevops"]:
+                return self._ado_get_files(repo, ref)
+            elif self.vcs_type == "bitbucket":
+                return self._bitbucket_get_files(repo, ref)
+            elif self.vcs_type == "gitlab":
+                return self._gitlab_get_files(repo, ref)
+            
+            return []
+        except Exception as e:
+            logger.error(f"Error getting repository files: {str(e)}")
+            return []
+    
+    def get_file_content(self, repo: str, path: str, ref: str = None) -> str:
+        """
+        Get content of a file from the repository
+        
+        Args:
+            repo: Repository identifier (e.g., "owner/repo")
+            path: File path within the repository
+            ref: Branch/tag reference (if None, uses default branch)
+            
+        Returns:
+            File content as string
+        """
+        # If ref is not provided, use environment variable or fall back to 'main'
+        if ref is None:
+            ref = os.environ.get("REPO_DEFAULT_BRANCH", "main")
+            
+        try:
+            if self.vcs_type == "github":
+                return self._github_get_content(repo, path, ref)
+            elif self.vcs_type in ["ado", "azure", "azuredevops"]:
+                return self._ado_get_content(repo, path, ref)
+            elif self.vcs_type == "bitbucket":
+                return self._bitbucket_get_content(repo, path, ref)
+            elif self.vcs_type == "gitlab":
+                return self._gitlab_get_content(repo, path, ref)
+            
+            raise ValueError(f"Unsupported VCS provider: {self.vcs_type}")
+        except Exception as e:
+            logger.error(f"Error getting file content for {path}: {str(e)}")
+            raise
+    
+    def create_branch(self, repo: str, branch_name: str, base_ref: str = None) -> bool:
+        """
+        Create a new branch
+        
+        Args:
+            repo: Repository identifier (e.g., "owner/repo")
+            branch_name: Name for the new branch
+            base_ref: Base branch/reference (if None, uses default branch)
+            
+        Returns:
+            True if successful
+        """
+        # If base_ref is not provided, use environment variable or fall back to 'main'
+        if base_ref is None:
+            base_ref = os.environ.get("REPO_DEFAULT_BRANCH", "main")
+            
+        logger.info(f"Creating branch {branch_name} from {base_ref} in {repo}")
+        
+        try:
+            if self.vcs_type == "github":
+                return self._github_create_branch(repo, branch_name, base_ref)
+            elif self.vcs_type in ["ado", "azure", "azuredevops"]:
+                return self._ado_create_branch(repo, branch_name, base_ref)
+            elif self.vcs_type == "bitbucket":
+                return self._bitbucket_create_branch(repo, branch_name, base_ref)
+            elif self.vcs_type == "gitlab":
+                return self._gitlab_create_branch(repo, branch_name, base_ref)
+            
+            raise ValueError(f"Unsupported VCS provider: {self.vcs_type}")
+        except Exception as e:
+            logger.error(f"Error creating branch {branch_name}: {str(e)}")
+            raise
     
     def update_file(self, repo: str, path: str, content: str, commit_msg: str, branch: str) -> bool:
-        """Update a file in the repository"""
-        if self.vcs_type == "github":
-            return self._github_update_file(repo, path, content, commit_msg, branch)
-        elif self.vcs_type == "ado":
-            return self._ado_update_file(repo, path, content, commit_msg, branch)
-        elif self.vcs_type == "bitbucket":
-            return self._bitbucket_update_file(repo, path, content, commit_msg, branch)
-    
-    def create_pull_request(self, repo: str, title: str, body: str, head: str, base: str = "main") -> str:
-        """Create a pull request"""
-        if self.vcs_type == "github":
-            return self._github_create_pr(repo, title, body, head, base)
-        elif self.vcs_type == "ado":
-            return self._ado_create_pr(repo, title, body, head, base)
-        elif self.vcs_type == "bitbucket":
-            return self._bitbucket_create_pr(repo, title, body, head, base)
-    
-    # GitHub implementations
-    def _github_get_files(self, repo: str, ref: str = "main") -> List[str]:
-        """Get list of files from GitHub repository"""
+        """
+        Update a file in the repository
+        
+        Args:
+            repo: Repository identifier (e.g., "owner/repo")
+            path: File path within the repository
+            content: New file content
+            commit_msg: Commit message
+            branch: Branch name
+            
+        Returns:
+            True if successful
+        """
+        logger.info(f"Updating file {path} in {repo} on branch {branch}")
+        
         try:
+            if self.vcs_type == "github":
+                return self._github_update_file(repo, path, content, commit_msg, branch)
+            elif self.vcs_type in ["ado", "azure", "azuredevops"]:
+                return self._ado_update_file(repo, path, content, commit_msg, branch)
+            elif self.vcs_type == "bitbucket":
+                return self._bitbucket_update_file(repo, path, content, commit_msg, branch)
+            elif self.vcs_type == "gitlab":
+                return self._gitlab_update_file(repo, path, content, commit_msg, branch)
+            
+            raise ValueError(f"Unsupported VCS provider: {self.vcs_type}")
+        except Exception as e:
+            logger.error(f"Error updating file {path}: {str(e)}")
+            raise
+    
+    def create_pull_request(self, repo: str, title: str, body: str, head: str, base: str = None) -> str:
+        """
+        Create a pull request
+        
+        Args:
+            repo: Repository identifier (e.g., "owner/repo")
+            title: PR title
+            body: PR description
+            head: Source branch
+            base: Target branch (if None, uses default branch)
+            
+        Returns:
+            PR URL or identifier
+        """
+        # If base is not provided, use environment variable or fall back to 'main'
+        if base is None:
+            base = os.environ.get("REPO_DEFAULT_BRANCH", "main")
+            
+        logger.info(f"Creating PR from {head} to {base} in {repo}")
+        
+        try:
+            if self.vcs_type == "github":
+                return self._github_create_pr(repo, title, body, head, base)
+            elif self.vcs_type in ["ado", "azure", "azuredevops"]:
+                return self._ado_create_pr(repo, title, body, head, base)
+            elif self.vcs_type == "bitbucket":
+                return self._bitbucket_create_pr(repo, title, body, head, base)
+            elif self.vcs_type == "gitlab":
+                return self._gitlab_create_pr(repo, title, body, head, base)
+            
+            raise ValueError(f"Unsupported VCS provider: {self.vcs_type}")
+        except Exception as e:
+            logger.error(f"Error creating PR: {str(e)}")
+            raise
+            
+    # Implementation methods for each VCS provider
+    def _github_get_files(self, repo: str, ref: str) -> List[str]:
+        """Get list of files from GitHub repository"""
+        all_files = []
+        
+        try:
+            # Try to use recursive tree API to get all files at once (most efficient)
             response = self.session.get(
-                f"https://api.github.com/repos/{repo}/git/trees/{ref}",
+                f"{self.api_base_url}/repos/{repo}/git/trees/{ref}",
                 params={"recursive": "1"}
             )
             
             if response.status_code == 200:
                 data = response.json()
-                return [item["path"] for item in data.get("tree", []) if item["type"] == "blob"]
-            
-            # Try alternative branches if main doesn't exist
-            alt_branches = ["master", "develop", "dev"]
-            for branch in alt_branches:
-                response = self.session.get(
-                    f"https://api.github.com/repos/{repo}/git/trees/{branch}",
-                    params={"recursive": "1"}
-                )
-                if response.status_code == 200:
-                    data = response.json()
+                if not data.get("truncated", False):
                     return [item["path"] for item in data.get("tree", []) if item["type"] == "blob"]
             
-            return []
+            # If truncated or failed, use iterative approach
+            self._github_get_directory_contents(repo, "", ref, all_files)
+            return all_files
+            
         except Exception as e:
-            print(f"Error getting GitHub files: {str(e)}")
+            logger.error(f"Error getting GitHub files: {str(e)}")
             return []
     
-    def _github_get_content(self, repo: str, path: str, ref: str = "main") -> str:
+    def _github_get_directory_contents(self, repo: str, path: str, ref: str, all_files: List[str]):
+        """Recursively get all files in a GitHub directory"""
+        url = f"{self.api_base_url}/repos/{repo}/contents/{path}"
+        response = self.session.get(url, params={"ref": ref})
+        
+        if response.status_code != 200:
+            return
+        
+        items = response.json()
+        if not isinstance(items, list):
+            return
+        
+        for item in items:
+            if item["type"] == "file":
+                all_files.append(item["path"])
+            elif item["type"] == "dir":
+                self._github_get_directory_contents(repo, item["path"], ref, all_files)
+    
+    def _github_get_content(self, repo: str, path: str, ref: str) -> str:
         """Get file content from GitHub"""
         response = self.session.get(
-            f"https://api.github.com/repos/{repo}/contents/{path}",
+            f"{self.api_base_url}/repos/{repo}/contents/{path}",
             params={"ref": ref}
         )
         
@@ -143,16 +337,16 @@ class VCSService:
         content = response.json().get("content", "")
         return base64.b64decode(content).decode('utf-8')
     
-    def _github_create_branch(self, repo: str, branch_name: str, base_ref: str = "main") -> bool:
+    def _github_create_branch(self, repo: str, branch_name: str, base_ref: str) -> bool:
         """Create a new branch in GitHub"""
         # Get the SHA of the base branch
-        response = self.session.get(f"https://api.github.com/repos/{repo}/git/refs/heads/{base_ref}")
+        response = self.session.get(f"{self.api_base_url}/repos/{repo}/git/refs/heads/{base_ref}")
         
         if response.status_code != 200:
             # Try alternative base branches
             alt_branches = ["master", "develop", "dev"]
             for branch in alt_branches:
-                response = self.session.get(f"https://api.github.com/repos/{repo}/git/refs/heads/{branch}")
+                response = self.session.get(f"{self.api_base_url}/repos/{repo}/git/refs/heads/{branch}")
                 if response.status_code == 200:
                     base_ref = branch
                     break
@@ -164,7 +358,7 @@ class VCSService:
         
         # Create the new branch
         response = self.session.post(
-            f"https://api.github.com/repos/{repo}/git/refs",
+            f"{self.api_base_url}/repos/{repo}/git/refs",
             json={
                 "ref": f"refs/heads/{branch_name}",
                 "sha": sha
@@ -178,7 +372,7 @@ class VCSService:
         # Get the current file to obtain its SHA
         try:
             response = self.session.get(
-                f"https://api.github.com/repos/{repo}/contents/{path}",
+                f"{self.api_base_url}/repos/{repo}/contents/{path}",
                 params={"ref": branch}
             )
             current_sha = response.json().get("sha") if response.status_code == 200 else None
@@ -197,16 +391,16 @@ class VCSService:
         
         # Update the file
         response = self.session.put(
-            f"https://api.github.com/repos/{repo}/contents/{path}",
+            f"{self.api_base_url}/repos/{repo}/contents/{path}",
             json=data
         )
         
         return response.status_code in (200, 201)
     
-    def _github_create_pr(self, repo: str, title: str, body: str, head: str, base: str = "main") -> str:
+    def _github_create_pr(self, repo: str, title: str, body: str, head: str, base: str) -> str:
         """Create a pull request in GitHub"""
         response = self.session.post(
-            f"https://api.github.com/repos/{repo}/pulls",
+            f"{self.api_base_url}/repos/{repo}/pulls",
             json={
                 "title": title,
                 "body": body,
@@ -220,5 +414,392 @@ class VCSService:
         
         return response.json()["html_url"]
     
-    # ADO implementations would go here
-    # Bitbucket implementations would go here
+    # ADO (Azure DevOps) methods
+    def _ado_get_files(self, repo: str, ref: str) -> List[str]:
+        """Get list of files from Azure DevOps repository"""
+        all_files = []
+        
+        try:
+            # Make API call to get repository items
+            response = self.session.get(
+                f"{self.api_base_url}/_apis/git/repositories/{repo}/items",
+                params={
+                    "recursionLevel": "Full",
+                    "versionDescriptor.version": ref,
+                    "versionDescriptor.versionType": "branch",
+                    "api-version": "6.0"
+                }
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                # Filter out folders, only include files
+                return [item["path"] for item in data.get("value", []) if item.get("isFolder", True) == False]
+            else:
+                logger.warning(f"ADO API returned status code {response.status_code}: {response.text}")
+                return []
+                
+        except Exception as e:
+            logger.error(f"Error getting ADO files: {str(e)}")
+            return []
+    
+    def _ado_get_content(self, repo: str, path: str, ref: str) -> str:
+        """Get file content from Azure DevOps"""
+        response = self.session.get(
+            f"{self.api_base_url}/_apis/git/repositories/{repo}/items",
+            params={
+                "path": path,
+                "versionDescriptor.version": ref,
+                "includeContent": "true",
+                "api-version": "6.0"
+            }
+        )
+        
+        if response.status_code != 200:
+            raise Exception(f"Failed to get file: {response.text}")
+        
+        return response.text
+    
+    def _ado_create_branch(self, repo: str, branch_name: str, base_ref: str) -> bool:
+        """Create a new branch in Azure DevOps"""
+        # Get the object ID of the base branch
+        response = self.session.get(
+            f"{self.api_base_url}/_apis/git/repositories/{repo}/refs",
+            params={
+                "filter": f"heads/{base_ref}",
+                "api-version": "6.0"
+            }
+        )
+        
+        if response.status_code != 200 or not response.json().get("value"):
+            raise Exception(f"Failed to get base branch: {response.text}")
+        
+        base_object_id = response.json()["value"][0]["objectId"]
+        
+        # Create the new branch
+        data = {
+            "name": f"refs/heads/{branch_name}",
+            "oldObjectId": "0000000000000000000000000000000000000000",
+            "newObjectId": base_object_id
+        }
+        
+        response = self.session.post(
+            f"{self.api_base_url}/_apis/git/repositories/{repo}/refs",
+            json=[data],
+            params={"api-version": "6.0"}
+        )
+        
+        return response.status_code == 200
+    
+    def _ado_update_file(self, repo: str, path: str, content: str, commit_msg: str, branch: str) -> bool:
+        """Update a file in Azure DevOps"""
+        # ADO requires more complex API calls for updates, using a push operation
+        # First, get the latest commit on the branch
+        response = self.session.get(
+            f"{self.api_base_url}/_apis/git/repositories/{repo}/refs",
+            params={
+                "filter": f"heads/{branch}",
+                "api-version": "6.0"
+            }
+        )
+        
+        if response.status_code != 200 or not response.json().get("value"):
+            raise Exception(f"Failed to get branch reference: {response.text}")
+        
+        old_object_id = response.json()["value"][0]["objectId"]
+        
+        # Create a push with the changes
+        push_data = {
+            "refUpdates": [
+                {
+                    "name": f"refs/heads/{branch}",
+                    "oldObjectId": old_object_id
+                }
+            ],
+            "commits": [
+                {
+                    "comment": commit_msg,
+                    "changes": [
+                        {
+                            "changeType": "edit",
+                            "item": {
+                                "path": path
+                            },
+                            "newContent": {
+                                "content": content,
+                                "contentType": "rawtext"
+                            }
+                        }
+                    ]
+                }
+            ]
+        }
+        
+        response = self.session.post(
+            f"{self.api_base_url}/_apis/git/repositories/{repo}/pushes",
+            json=push_data,
+            params={"api-version": "6.0"}
+        )
+        
+        return response.status_code == 201
+    
+    def _ado_create_pr(self, repo: str, title: str, body: str, head: str, base: str) -> str:
+        """Create a pull request in Azure DevOps"""
+        data = {
+            "sourceRefName": f"refs/heads/{head}",
+            "targetRefName": f"refs/heads/{base}",
+            "title": title,
+            "description": body
+        }
+        
+        response = self.session.post(
+            f"{self.api_base_url}/_apis/git/repositories/{repo}/pullrequests",
+            json=data,
+            params={"api-version": "6.0"}
+        )
+        
+        if response.status_code != 201:
+            raise Exception(f"Failed to create PR: {response.text}")
+        
+        return response.json()["url"]
+    
+    # Bitbucket methods
+    def _bitbucket_get_files(self, repo: str, ref: str) -> List[str]:
+        """Get list of files from Bitbucket repository"""
+        all_files = []
+        
+        try:
+            # Start with the root directory
+            self._bitbucket_get_directory_contents(repo, "", ref, all_files)
+            return all_files
+        except Exception as e:
+            logger.error(f"Error getting Bitbucket files: {str(e)}")
+            return []
+    
+    def _bitbucket_get_directory_contents(self, repo: str, path: str, ref: str, all_files: List[str]):
+        """Recursively get all files in a Bitbucket directory"""
+        url = f"{self.api_base_url}/repositories/{self.workspace}/{repo}/src/{ref}/{path}"
+        response = self.session.get(url)
+        
+        if response.status_code != 200:
+            return
+        
+        data = response.json()
+        
+        # Process files
+        for item in data.get("values", []):
+            if item["type"] == "commit_file":
+                full_path = path + "/" + item["path"] if path else item["path"]
+                all_files.append(full_path)
+            elif item["type"] == "commit_directory":
+                dir_path = path + "/" + item["path"] if path else item["path"]
+                self._bitbucket_get_directory_contents(repo, dir_path, ref, all_files)
+    
+    def _bitbucket_get_content(self, repo: str, path: str, ref: str) -> str:
+        """Get file content from Bitbucket"""
+        response = self.session.get(
+            f"{self.api_base_url}/repositories/{self.workspace}/{repo}/src/{ref}/{path}"
+        )
+        
+        if response.status_code != 200:
+            raise Exception(f"Failed to get file: {response.text}")
+        
+        return response.text
+    
+    def _bitbucket_create_branch(self, repo: str, branch_name: str, base_ref: str) -> bool:
+        """Create a new branch in Bitbucket"""
+        data = {
+            "name": branch_name,
+            "target": {
+                "hash": base_ref
+            }
+        }
+        
+        response = self.session.post(
+            f"{self.api_base_url}/repositories/{self.workspace}/{repo}/refs/branches",
+            json=data
+        )
+        
+        return response.status_code == 201
+    
+    def _bitbucket_update_file(self, repo: str, path: str, content: str, commit_msg: str, branch: str) -> bool:
+        """Update a file in Bitbucket"""
+        # Bitbucket uses a form-data approach for file updates
+        files = {
+            path: (None, content)
+        }
+        
+        data = {
+            "message": commit_msg,
+            "branch": branch
+        }
+        
+        response = self.session.post(
+            f"{self.api_base_url}/repositories/{self.workspace}/{repo}/src",
+            data=data,
+            files=files
+        )
+        
+        return response.status_code in (200, 201)
+    
+    def _bitbucket_create_pr(self, repo: str, title: str, body: str, head: str, base: str) -> str:
+        """Create a pull request in Bitbucket"""
+        data = {
+            "title": title,
+            "description": body,
+            "source": {
+                "branch": {
+                    "name": head
+                }
+            },
+            "destination": {
+                "branch": {
+                    "name": base
+                }
+            }
+        }
+        
+        response = self.session.post(
+            f"{self.api_base_url}/repositories/{self.workspace}/{repo}/pullrequests",
+            json=data
+        )
+        
+        if response.status_code != 201:
+            raise Exception(f"Failed to create PR: {response.text}")
+        
+        return response.json()["links"]["html"]["href"]
+    
+    # GitLab methods 
+    def _gitlab_get_files(self, repo: str, ref: str) -> List[str]:
+        """Get list of files from GitLab repository"""
+        # GitLab requires URL-encoded repository path
+        import urllib.parse
+        repo_encoded = urllib.parse.quote_plus(repo)
+        
+        all_files = []
+        page = 1
+        per_page = 100
+        
+        while True:
+            response = self.session.get(
+                f"{self.api_base_url}/projects/{repo_encoded}/repository/tree",
+                params={
+                    "ref": ref,
+                    "recursive": "true",
+                    "per_page": per_page,
+                    "page": page
+                }
+            )
+            
+            if response.status_code != 200:
+                break
+                
+            items = response.json()
+            if not items:
+                break
+                
+            # Add file paths
+            for item in items:
+                if item["type"] == "blob":
+                    all_files.append(item["path"])
+                    
+            # If we got fewer items than per_page, we're done
+            if len(items) < per_page:
+                break
+                
+            page += 1
+        
+        return all_files
+    
+    def _gitlab_get_content(self, repo: str, path: str, ref: str) -> str:
+        """Get file content from GitLab"""
+        import urllib.parse
+        repo_encoded = urllib.parse.quote_plus(repo)
+        path_encoded = urllib.parse.quote_plus(path)
+        
+        response = self.session.get(
+            f"{self.api_base_url}/projects/{repo_encoded}/repository/files/{path_encoded}",
+            params={
+                "ref": ref
+            }
+        )
+        
+        if response.status_code != 200:
+            raise Exception(f"Failed to get file: {response.text}")
+        
+        content = response.json()["content"]
+        encoding = response.json()["encoding"]
+        
+        if encoding == "base64":
+            return base64.b64decode(content).decode('utf-8')
+        else:
+            return content
+    
+    def _gitlab_create_branch(self, repo: str, branch_name: str, base_ref: str) -> bool:
+        """Create a new branch in GitLab"""
+        import urllib.parse
+        repo_encoded = urllib.parse.quote_plus(repo)
+        
+        data = {
+            "branch": branch_name,
+            "ref": base_ref
+        }
+        
+        response = self.session.post(
+            f"{self.api_base_url}/projects/{repo_encoded}/repository/branches",
+            json=data
+        )
+        
+        return response.status_code == 201
+    
+    def _gitlab_update_file(self, repo: str, path: str, content: str, commit_msg: str, branch: str) -> bool:
+        """Update a file in GitLab"""
+        import urllib.parse
+        repo_encoded = urllib.parse.quote_plus(repo)
+        path_encoded = urllib.parse.quote_plus(path)
+        
+        data = {
+            "branch": branch,
+            "content": content,
+            "commit_message": commit_msg
+        }
+        
+        # Check if file exists first
+        try:
+            self._gitlab_get_content(repo, path, branch)
+            # File exists, use PUT to update
+            response = self.session.put(
+                f"{self.api_base_url}/projects/{repo_encoded}/repository/files/{path_encoded}",
+                json=data
+            )
+        except:
+            # File doesn't exist, use POST to create
+            data["content"] = content
+            response = self.session.post(
+                f"{self.api_base_url}/projects/{repo_encoded}/repository/files/{path_encoded}",
+                json=data
+            )
+        
+        return response.status_code in (200, 201)
+    
+    def _gitlab_create_pr(self, repo: str, title: str, body: str, head: str, base: str) -> str:
+        """Create a merge request (PR) in GitLab"""
+        import urllib.parse
+        repo_encoded = urllib.parse.quote_plus(repo)
+        
+        data = {
+            "title": title,
+            "description": body,
+            "source_branch": head,
+            "target_branch": base
+        }
+        
+        response = self.session.post(
+            f"{self.api_base_url}/projects/{repo_encoded}/merge_requests",
+            json=data
+        )
+        
+        if response.status_code != 201:
+            raise Exception(f"Failed to create merge request: {response.text}")
+        
+        return response.json()["web_url"]
