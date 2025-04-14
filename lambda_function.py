@@ -274,7 +274,6 @@ def lambda_handler(event, context):
             ticket_id = ticket_service.create_ticket(
                 ticket_details.get('title', problem_info.get('title', 'Issue from alert')),
                 ticket_details.get('description', 'No description provided'),
-                priority=ticket_details.get('priority', 'Medium'),
                 labels=ticket_details.get('tags', ['auto-generated'])
             )
             
@@ -310,7 +309,6 @@ def lambda_handler(event, context):
                 
                 Needed Information: {analysis.get('details', {}).get('needed_info', 'Additional context is required')}
                 """,
-                priority="Medium",
                 labels=["investigation-needed", "auto-generated"]
             )
             
