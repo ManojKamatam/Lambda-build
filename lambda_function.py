@@ -76,7 +76,12 @@ def lambda_handler(event, context):
         vcs_service = VCSService()
         ai_service = AIService(ANTHROPIC_API_KEY)
         opensearch_service = OpenSearchService(OPENSEARCH_ENDPOINT) if OPENSEARCH_ENDPOINT else None
-        apm_service = APMService() if ENABLE_APM_TOOLS else None
+        # In your lambda_handler
+        apm_service = APMService(
+            apm_type=APM_TYPE, 
+            api_key=APM_API_KEY, 
+            **APM_EXTRA_PARAMS
+        ) if ENABLE_APM_TOOLS else None
         ticket_service = TicketService()
         
         # Extract problem information
