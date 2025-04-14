@@ -71,9 +71,20 @@ class TicketService:
             'issuetype': {'name': kwargs.get('issue_type', 'Bug')}
         }
         
-        # Add optional fields if provided
-        if 'priority' in kwargs:
-            issue_dict['priority'] = {'name': kwargs['priority']}
+        # Add optional fields if provided but with try/except handling
+        try:
+            if 'priority' in kwargs:
+                # First check if specified priority exists
+                priorities = self.client.priorities()
+                priority_names = [p.name for p in priorities]
+                
+                if kwargs['priority'] in priority_names:
+                    issue_dict['priority'] = {'name': kwargs['priority']}
+        except Exception as e:
+            # Log the error but continue without the priority
+            print(f"Warning: Could not set priority: {e}")
+        
+        # Rest of the code remains the same
         if 'components' in kwargs:
             issue_dict['components'] = [{'name': c} for c in kwargs['components']]
         if 'labels' in kwargs:
