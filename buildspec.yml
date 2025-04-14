@@ -3,14 +3,13 @@ version: 0.2
 phases:
   install:
     commands:
-      - echo "Installing required tools"
+      - echo "Installing tools (curl + unzip + docker if needed)"
       - yum update -y
       - yum install -y unzip curl docker --allowerasing
-      - service docker start
 
   pre_build:
     commands:
-      - echo "Logging in to Amazon ECR..."
+      - echo "Logging into Amazon ECR..."
       - IMAGE_NAME=lambda-vector-service
       - IMAGE_TAG=latest
       - $(aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com)
