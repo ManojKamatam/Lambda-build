@@ -351,16 +351,32 @@ def extract_problem_info(event):
             'description': event.get('description', 'No details available')
         }
 
+# Updated environment variables for generic repository configuration
+REPO_OWNER = os.environ.get("REPO_OWNER") 
+REPO_NAME = os.environ.get("REPO_NAME")
+REPO_DEFAULT_BRANCH = os.environ.get("REPO_DEFAULT_BRANCH", "main")
+
 def extract_repo_info(event):
-    """Extract repository information from the event"""
+    """Extract repository information from the event or environment variables"""
     if 'repository' in event:
         return event['repository']
-    else:
+    elif 'repo_owner' in event and 'repo_name' in event:
         return {
             'owner': event.get('repo_owner'),
             'repo': event.get('repo_name'),
-            'default_branch': event.get('default_branch', 'main')
+            'default_branch': event.get('default_branch', REPO_DEFAULT_BRANCH)
         }
+    elif REPO_OWNER and REPO_NAME:
+        # Use environment variables as the source of truth
+        return {
+            'owner': REPO_OWNER,
+            'repo': REPO_NAME,
+            'default_branch': REPO_DEFAULT_BRANCH
+        }
+    else:
+        # Last resort - return empty dict (will be caught as an error)
+        logger.error("No repository information available in event or environment variables")
+        return {}
 
 def filter_files_by_extensions(file_list):
     """Filter files based on extensions of interest"""
