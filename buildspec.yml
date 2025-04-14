@@ -5,29 +5,26 @@ phases:
     commands:
       - echo "Installing required tools"
       - yum update -y
-      - yum install -y unzip curl
+      - yum install -y unzip curl docker --allowerasing
+      - service docker start
 
   pre_build:
     commands:
       - echo "Logging in to Amazon ECR..."
-      - aws --version
-      - $(aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com)
       - IMAGE_NAME=lambda-vector-service
       - IMAGE_TAG=latest
-      - echo "Pre-build complete"
+      - $(aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com)
 
   build:
     commands:
       - echo "Building Docker image..."
       - docker build -t $IMAGE_NAME .
       - docker tag $IMAGE_NAME:latest $ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$IMAGE_NAME:$IMAGE_TAG
-      - echo "Docker image built and tagged"
 
   post_build:
     commands:
       - echo "Pushing Docker image to ECR..."
       - docker push $ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$IMAGE_NAME:$IMAGE_TAG
-      - echo "Build and push complete"
 
 artifacts:
   files:
