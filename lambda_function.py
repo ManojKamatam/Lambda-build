@@ -55,15 +55,15 @@ except Exception as e:
 
 # Environment configuration - now using secrets with fallbacks
 ANTHROPIC_API_KEY = secrets.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
-VCS_TYPE = os.environ.get("VCS_TYPE", "github")
+VCS_TYPE = os.environ.get("VCS_TYPE")
 VCS_TOKEN = secrets.get("VCS_TOKEN") or os.environ.get("VCS_TOKEN")
-VCS_EXTRA_PARAMS = json.loads(secrets.get("VCS_EXTRA_PARAMS", "{}")) or json.loads(os.environ.get("VCS_EXTRA_PARAMS", "{}"))
+VCS_EXTRA_PARAMS = json.loads(secrets.get("VCS_EXTRA_PARAMS")) or json.loads(os.environ.get("VCS_EXTRA_PARAMS"))
 OPENSEARCH_ENDPOINT = os.environ.get("OPENSEARCH_ENDPOINT")
 ENABLE_APM_TOOLS = os.environ.get("ENABLE_APM_TOOLS", "true").lower() == "true"
-APM_TYPE = os.environ.get("APM_TYPE", "dynatrace")
+APM_TYPE = os.environ.get("APM_TYPE")
 APM_API_KEY = secrets.get("APM_API_KEY") or os.environ.get("APM_API_KEY")
 APM_EXTRA_PARAMS = json.loads(secrets.get("APM_EXTRA_PARAMS", "{}")) or json.loads(os.environ.get("APM_EXTRA_PARAMS", "{}"))
-TICKET_TYPE = os.environ.get("TICKET_TYPE", "jira")
+TICKET_TYPE = os.environ.get("TICKET_TYPE")
 TICKET_PARAMS = json.loads(secrets.get("TICKET_PARAMS", "{}")) or json.loads(os.environ.get("TICKET_PARAMS", "{}"))
 NOTIFICATION_WEBHOOK = secrets.get("NOTIFICATION_WEBHOOK") or os.environ.get("NOTIFICATION_WEBHOOK")
 
