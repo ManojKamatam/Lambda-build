@@ -4,6 +4,7 @@ import logging
 import boto3
 import datetime
 import numpy as np
+import re
 from opensearch_service import OpenSearchService
 from vcs_service import VCSService
 from apm_service import APMService
@@ -57,7 +58,7 @@ except Exception as e:
 ANTHROPIC_API_KEY = secrets.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
 VCS_TYPE = os.environ.get("VCS_TYPE")
 VCS_TOKEN = secrets.get("VCS_TOKEN") or os.environ.get("VCS_TOKEN")
-VCS_EXTRA_PARAMS = json.loads(secrets.get("VCS_EXTRA_PARAMS")) or json.loads(os.environ.get("VCS_EXTRA_PARAMS"))
+VCS_EXTRA_PARAMS = json.loads(secrets.get("VCS_EXTRA_PARAMS", "{}")) or json.loads(os.environ.get("VCS_EXTRA_PARAMS", "{}"))
 OPENSEARCH_ENDPOINT = os.environ.get("OPENSEARCH_ENDPOINT")
 ENABLE_APM_TOOLS = os.environ.get("ENABLE_APM_TOOLS", "true").lower() == "true"
 APM_TYPE = os.environ.get("APM_TYPE")
@@ -69,25 +70,30 @@ NOTIFICATION_WEBHOOK = secrets.get("NOTIFICATION_WEBHOOK") or os.environ.get("NO
 
 def lambda_handler(event, context):
     """Main Lambda handler"""
+    start_time = datetime.datetime.now()
     logger.info(f"Received event: {json.dumps(event)}")
     
     try:
         # Initialize services
+        logger.info("Initializing services")
         vcs_service = VCSService()
         ai_service = AIService(ANTHROPIC_API_KEY)
         opensearch_service = OpenSearchService(OPENSEARCH_ENDPOINT) if OPENSEARCH_ENDPOINT else None
-        # In your lambda_handler
+        
         apm_service = APMService(
             apm_type=APM_TYPE, 
             api_key=APM_API_KEY, 
             **APM_EXTRA_PARAMS
         ) if ENABLE_APM_TOOLS else None
+        
+        logger.info(f"APM service initialized: {apm_service is not None}")
+        
         ticket_service = TicketService(
-        ticket_type=TICKET_TYPE,
-        **TICKET_PARAMS  # Pass the Jira configuration
+            ticket_type=TICKET_TYPE,
+            **TICKET_PARAMS
         )
         
-        # Extract problem information
+        # Extract problem information with enhanced component extraction
         problem_info = extract_problem_info(event)
         logger.info(f"Extracted problem info: {json.dumps(problem_info)}")
         
@@ -109,110 +115,170 @@ def lambda_handler(event, context):
         
         # Log some example files if any were found
         if file_list:
-            logger.info(f"Sample files: {file_list[:5]}")
+            logger.info(f"Sample files: {', '.join(file_list[:5])}")
         else:
             logger.warning("No files found in repository - check GitHub token permissions and repo existence")
+            return {
+                'statusCode': 200,
+                'body': json.dumps('No files found in repository')
+            }
         
-        # Filter files by extensions to reduce the search space
-        filtered_files = filter_files_by_extensions(file_list)
+        # Try component-based file discovery first
+        component_files = get_component_based_files(vcs_service, repo, problem_info, file_list)
+        logger.info(f"Found {len(component_files)} files using component matching")
         
-        # Get content for a subset of files for embedding
-        file_contents = {}
-        for file_path in filtered_files[:50]:  # Limit to 50 files for embedding
-            try:
-                content = vcs_service.get_file_content(repo, file_path)
-                file_contents[file_path] = content
-            except Exception as e:
-                logger.debug(f"Failed to get file {file_path}: {str(e)}")
-        
-        # Create problem text for embedding
-        problem_text = f"{problem_info.get('title', '')}\n{problem_info.get('description', '')}"
-        
-        # Get vectors for problem and files
-        problem_embedding = ai_service.get_embeddings([problem_text])[0]
-        
-        # Calculate embeddings for files
-        file_embeddings = []
-        file_paths = []
-        
-        for file_path, content in file_contents.items():
-            # Use first 1000 chars as a sample
-            file_embedding = ai_service.get_embeddings([content[:1000]])[0]
-            file_embeddings.append(file_embedding)
-            file_paths.append(file_path)
-        
-        # Calculate similarities
-        similarities = []
-        for file_embedding in file_embeddings:
-            # Cosine similarity using numpy
-            similarity = np.dot(problem_embedding, file_embedding) / (
-                np.linalg.norm(problem_embedding) * np.linalg.norm(file_embedding)
-            )
-            similarities.append(float(similarity))
-        
-        # Get top relevant files
-        if similarities:
-            top_indices = np.argsort(similarities)[::-1][:10]  # Top 10 files
-            relevant_file_paths = [file_paths[i] for i in top_indices]
-        else:
-            relevant_file_paths = []
-        
-        logger.info(f"Found {len(relevant_file_paths)} relevant files")
-        
-        # Get content for relevant files
+        # If component-based discovery found files, use them
         relevant_files = {}
-        for file_path in relevant_file_paths:
-            if file_path in file_contents:
-                relevant_files[file_path] = file_contents[file_path]
-            else:
+        if component_files:
+            relevant_files = component_files
+            logger.info("Using component-matched files for analysis")
+        else:
+            # Fall back to semantic search
+            logger.info("No files found via component matching, falling back to semantic search")
+            
+            # Filter files by extensions to reduce the search space
+            filtered_files = filter_files_by_extensions(file_list)
+            logger.info(f"Filtered to {len(filtered_files)} files based on extensions")
+            
+            # Get content for a subset of files for embedding
+            file_contents = {}
+            for file_path in filtered_files[:50]:  # Limit to 50 files for embedding
                 try:
                     content = vcs_service.get_file_content(repo, file_path)
-                    relevant_files[file_path] = content
+                    file_contents[file_path] = content
                 except Exception as e:
-                    logger.warning(f"Failed to get file {file_path}: {str(e)}")
-        
-        # Store vectors in OpenSearch if available
-        if opensearch_service:
-            try:
-                # Store problem vector
-                opensearch_service.index_vector(
-                    f"problem_{context.aws_request_id}",
-                    problem_embedding,
-                    {
-                        "type": "problem",
-                        "title": problem_info.get('title', ''),
-                        "severity": problem_info.get('severity', ''),
-                        "repository": repo,
-                        "timestamp": datetime.datetime.now().isoformat()
-                    }
-                )
+                    logger.debug(f"Failed to get file {file_path}: {str(e)}")
+            
+            # Create enhanced problem text for embedding
+            components_text = ", ".join(problem_info.get('components', []))
+            service_names_text = ", ".join(problem_info.get('service_names', []))
+            
+            problem_text = f"""
+            {problem_info.get('title', '')}
+            {problem_info.get('plain_description', problem_info.get('description', ''))}
+            Services: {service_names_text}
+            Components: {components_text}
+            """
+            
+            logger.info(f"Created problem text for embeddings ({len(problem_text)} chars)")
+            
+            # Get vectors for problem and files
+            problem_embedding = ai_service.get_embeddings([problem_text])[0]
+            
+            # Calculate embeddings for files
+            file_embeddings = []
+            file_paths = []
+            
+            for file_path, content in file_contents.items():
+                # Use a representative sample of the file
+                sample = content[:1000]
+                if len(content) > 2000:
+                    # Add end of file if long enough
+                    sample += "\n...\n" + content[-500:]
                 
-                # Store file vectors
-                opensearch_service.store_file_vectors(
-                    context.aws_request_id,
-                    file_paths,
-                    file_embeddings,
-                    file_contents,
-                    repo
+                file_embedding = ai_service.get_embeddings([sample])[0]
+                file_embeddings.append(file_embedding)
+                file_paths.append(file_path)
+            
+            # Calculate similarities
+            similarities = []
+            for file_embedding in file_embeddings:
+                # Cosine similarity using numpy
+                similarity = np.dot(problem_embedding, file_embedding) / (
+                    np.linalg.norm(problem_embedding) * np.linalg.norm(file_embedding)
                 )
-            except Exception as e:
-                logger.warning(f"Failed to store vectors in OpenSearch: {str(e)}")
+                similarities.append(float(similarity))
+            
+            # Get top relevant files with a lower threshold (0.1 instead of default)
+            if similarities:
+                # Include any files with similarity above threshold
+                threshold = 0.1
+                relevant_indices = [i for i, sim in enumerate(similarities) if sim > threshold]
+                
+                if relevant_indices:
+                    # Sort by similarity and take top 10
+                    top_indices = sorted(relevant_indices, key=lambda i: similarities[i], reverse=True)[:10]
+                    relevant_file_paths = [file_paths[i] for i in top_indices]
+                    
+                    # Log the similarity scores for debugging
+                    for i, idx in enumerate(top_indices):
+                        logger.info(f"File {file_paths[idx]} - similarity: {similarities[idx]:.3f}")
+                else:
+                    # If nothing above threshold, just take top 5 anyway
+                    top_indices = np.argsort(similarities)[::-1][:5]
+                    relevant_file_paths = [file_paths[i] for i in top_indices]
+                    logger.warning(f"No files above similarity threshold {threshold}, using top 5 anyway")
+            else:
+                relevant_file_paths = []
+            
+            logger.info(f"Found {len(relevant_file_paths)} relevant files via semantic search")
+            
+            # Get content for relevant files
+            for file_path in relevant_file_paths:
+                if file_path in file_contents:
+                    relevant_files[file_path] = file_contents[file_path]
+                else:
+                    try:
+                        content = vcs_service.get_file_content(repo, file_path)
+                        relevant_files[file_path] = content
+                    except Exception as e:
+                        logger.warning(f"Failed to get file {file_path}: {str(e)}")
+            
+            # Store vectors in OpenSearch if available
+            if opensearch_service:
+                try:
+                    # Store problem vector
+                    opensearch_service.index_vector(
+                        f"problem_{context.aws_request_id}",
+                        problem_embedding,
+                        {
+                            "type": "problem",
+                            "title": problem_info.get('title', ''),
+                            "severity": problem_info.get('severity', ''),
+                            "repository": repo,
+                            "timestamp": datetime.datetime.now().isoformat()
+                        }
+                    )
+                    
+                    # Store file vectors
+                    opensearch_service.store_file_vectors(
+                        context.aws_request_id,
+                        file_paths,
+                        file_embeddings,
+                        file_contents,
+                        repo
+                    )
+                    logger.info("Stored vectors in OpenSearch")
+                except Exception as e:
+                    logger.warning(f"Failed to store vectors in OpenSearch: {str(e)}")
 
         # Analyze the problem
+        if not relevant_files:
+            logger.warning("No relevant files found for analysis")
+            send_notification(
+                "No Relevant Files Found", 
+                f"Could not find any relevant files for issue: {problem_info.get('title')}"
+            )
+            return {
+                'statusCode': 200,
+                'body': json.dumps('No relevant files found for analysis')
+            }
+            
+        logger.info(f"Starting analysis with {len(relevant_files)} relevant files")
+        
         if ENABLE_APM_TOOLS and apm_service:
-            # First analysis
+            # First analysis with APM tools
             logger.info("Performing analysis with APM tools enabled")
             analysis = ai_service.analyze_problem_with_tools(problem_info, relevant_files, apm_service)
             
             # Extract tool calls
             tool_calls = []
-            for content in getattr(analysis, 'content', []):
-                if hasattr(content, 'type') and content.type == 'tool_use':
-                    tool_calls.append({
-                        'name': content.tool_use.name,
-                        'parameters': content.tool_use.input,
-                        'tool_use_id': content.tool_use.id
-                    })
+            
+            # Try to extract from response object or dictionary
+            if hasattr(analysis, 'tool_calls'):
+                tool_calls = analysis.tool_calls
+            elif isinstance(analysis, dict) and 'tool_calls' in analysis:
+                tool_calls = analysis['tool_calls']
             
             # If AI didn't use tools but we have service names, force tool usage
             if not tool_calls and problem_info.get('service_names'):
@@ -254,10 +320,11 @@ def lambda_handler(event, context):
                     analysis = updated_analysis
                     logger.info("Analysis updated with APM data")
                     
-                    # Extract error patterns from logs for additional file discovery
-                    if 'tool_results' in updated_analysis:
+                    # Check if we have tool results for additional file discovery
+                    if isinstance(analysis, dict) and 'tool_results' in analysis:
+                        # Extract error patterns from logs for additional file discovery
                         error_patterns = []
-                        for result in updated_analysis.get('tool_results', []):
+                        for result in analysis.get('tool_results', []):
                             if result.get('tool_name') == 'get_additional_logs':
                                 logs = result.get('result', [])
                                 for log in logs:
@@ -272,35 +339,44 @@ def lambda_handler(event, context):
                         if error_patterns:
                             logger.info(f"Found error patterns in logs: {error_patterns}")
                             # Add these as components for a second file search
-                            problem_info['components'] = list(set(problem_info.get('components', []) + error_patterns))
+                            if 'components' not in problem_info:
+                                problem_info['components'] = []
+                            problem_info['components'] = list(set(problem_info['components'] + error_patterns))
                             
                             # Do a second component-based file search
                             additional_files = get_component_based_files(vcs_service, repo, problem_info, file_list)
                             
                             # Add any new files to relevant_files
+                            new_files_count = 0
                             for file_path, content in additional_files.items():
                                 if file_path not in relevant_files:
                                     relevant_files[file_path] = content
+                                    new_files_count += 1
                             
-                            logger.info(f"Added {len(additional_files)} files based on log patterns")
+                            logger.info(f"Added {new_files_count} new files based on log patterns")
                             
-                            # Do one final analysis with the complete set of files
-                            if additional_files:
+                            # Do one final analysis with the complete set of files if we found new ones
+                            if new_files_count > 0:
+                                logger.info("Performing final analysis with additional files")
                                 final_analysis = ai_service.analyze_problem(problem_info, relevant_files)
                                 analysis = final_analysis
                 else:
                     logger.warning("Failed to get updated analysis with APM data")
         else:
+            # Regular analysis without APM tools
             analysis = ai_service.analyze_problem(problem_info, relevant_files)
         
         # Process based on analysis
         action = analysis.get('action', 'needs_more_info')
+        logger.info(f"Analysis determined action: {action}")
         
         if action == 'fix_code':
             # Switch to Claude Sonnet for code generation
+            logger.info("Generating code fix")
             updated_files = ai_service.generate_code_fix(problem_info, relevant_files, analysis)
             
             if not updated_files:
+                logger.warning("No file updates generated despite 'fix_code' action")
                 send_notification("No File Updates Generated", 
                                  f"AI analysis suggested a code fix but no updates were generated for: {problem_info.get('title')}")
                 return {
@@ -312,10 +388,12 @@ def lambda_handler(event, context):
             timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
             branch_name = f"ai-fix-{timestamp}"
             
+            logger.info(f"Creating branch {branch_name}")
             # Create branch
             vcs_service.create_branch(repo, branch_name, repo_info.get('default_branch', 'main'))
             
             # Update files
+            logger.info(f"Updating {len(updated_files)} files")
             for file_path, content in updated_files.items():
                 vcs_service.update_file(
                     repo,
@@ -341,6 +419,7 @@ def lambda_handler(event, context):
             Please review the changes and merge if appropriate.
             """
             
+            logger.info(f"Creating pull request")
             pr_url = vcs_service.create_pull_request(
                 repo,
                 pr_title,
@@ -364,6 +443,7 @@ def lambda_handler(event, context):
             
         elif action == 'create_ticket':
             # Generate ticket details and create ticket
+            logger.info("Creating ticket based on analysis")
             ticket_details = ai_service.create_ticket_details(problem_info, analysis)
             
             ticket_id = ticket_service.create_ticket(
@@ -392,6 +472,7 @@ def lambda_handler(event, context):
             
         else:  # needs_more_info
             # Create investigation ticket
+            logger.info("Creating investigation ticket for more information")
             ticket_id = ticket_service.create_ticket(
                 f"Investigation Needed: {problem_info.get('title', 'Alert')}",
                 f"""
@@ -429,6 +510,12 @@ def lambda_handler(event, context):
             'statusCode': 500,
             'body': json.dumps(f'Error: {str(e)}')
         }
+    finally:
+        # Log execution time
+        end_time = datetime.datetime.now()
+        duration = (end_time - start_time).total_seconds()
+        logger.info(f"Lambda execution completed in {duration:.2f} seconds")
+
 def get_component_based_files(vcs_service, repo, problem_info, file_list):
     """Find files based on components extracted from problem info"""
     components = problem_info.get('components', [])
