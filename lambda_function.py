@@ -423,14 +423,37 @@ def extract_repo_info(event):
         return {}
 
 def filter_files_by_extensions(file_list):
-    """Filter files based on extensions of interest"""
+    """Filter files based on extensions of interest and problem context"""
+    # Original list of extensions - keep this for backward compatibility
     extensions_of_interest = [
         '.py', '.js', '.java', '.go', '.ts', '.yaml', '.yml', 
         '.json', '.xml', '.sh', '.cs', '.cpp', '.h', '.jsx', 
         '.tsx', '.rb', '.php', '.tf', '.conf', '.properties'
     ]
     
-    return [f for f in file_list if any(f.endswith(ext) for ext in extensions_of_interest)]
+    # Add language-agnostic files that are typically important
+    important_files = [
+        'Dockerfile', 'docker-compose', 'Makefile', 'README', 
+        'app.py', 'main.py', 'index.', 'server.', 'config.', 'settings.',
+        'requirements.txt', 'package.json', 'build.gradle'
+    ]
+    
+    filtered_files = []
+    
+    for file_path in file_list:
+        file_path_lower = file_path.lower()
+        
+        # Include files with relevant extensions
+        if any(file_path.endswith(ext) for ext in extensions_of_interest):
+            filtered_files.append(file_path)
+            continue
+            
+        # Include important files regardless of extension
+        if any(important in file_path_lower for important in important_files):
+            filtered_files.append(file_path)
+            continue
+    
+    return filtered_files
 
 def send_notification(title, message):
     """Send a notification to the configured webhook"""
