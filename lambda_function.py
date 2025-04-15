@@ -14,6 +14,40 @@ from ticket_service import TicketService
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
+secrets = {}
+try:
+    # Get the secret name from environment variable
+    secret_name = os.environ.get('SECRET_NAME')
+    
+    if secret_name:
+        # Initialize AWS Secrets Manager client
+        region_name = os.environ.get('AWS_REGION', 'us-east-1')
+        secrets_client = boto3.client('secretsmanager', region_name=region_name)
+        
+        # Get the secret value
+        logger.info(f"Loading secrets from {secret_name}")
+        secret_response = secrets_client.get_secret_value(SecretId=secret_name)
+        
+        # Parse the secret value
+        if 'SecretString' in secret_response:
+            secret_string = secret_response['SecretString']
+            
+            # Check if the secret is a JSON string
+            try:
+                secrets = json.loads(secret_string)
+                logger.info("Successfully loaded secrets from AWS Secrets Manager")
+            except json.JSONDecodeError:
+                # If not JSON, treat it as a single secret value
+                logger.warning("Secret is not valid JSON, treating as a single secret value")
+                secrets = {"SECRET_VALUE": secret_string}
+        else:
+            logger.warning("No SecretString found in the secrets response")
+    else:
+        logger.info("No SECRET_NAME environment variable found, using environment variables only")
+except Exception as e:
+    logger.error(f"Error loading secrets from AWS Secrets Manager: {str(e)}")
+    logger.info("Proceeding with environment variables only")
+
 def get_secret_param(param_name, default=None):
     """Get a parameter from secrets or environment with proper error handling"""
     try:
