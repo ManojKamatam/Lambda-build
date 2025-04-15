@@ -351,25 +351,48 @@ def lambda_handler(event, context):
         }
 
 def extract_problem_info(event):
-    """Extract problem information from the event"""
-    # For Dynatrace alerts
-    if 'ProblemTitle' in event:
+    """Extract structured problem info from the event"""
+    try:
+        # For Dynatrace alerts
+        if 'problemTitle' in event:
+            # Extract service names from impacted entities
+            service_names = []
+            entity_ids = []
+            
+            for entity in event.get('impactedEntities', []):
+                if entity.get('type') == 'SERVICE':
+                    service_names.append(entity.get('name'))
+                    entity_ids.append(entity.get('entity'))
+            
+            # Extract more detailed description if available
+            description = event.get('problemDetails', 'No details available')
+            
+            return {
+                'title': event.get('problemTitle', 'Unknown Issue'),
+                'severity': event.get('severity', 'UNKNOWN'),
+                'impact': service_names[0] if service_names else "Unknown Service",
+                'description': description,
+                'service_names': service_names,
+                'entity_ids': entity_ids
+            }
+        
+        # For custom events and fallbacks
+        elif 'problem' in event:
+            return event['problem']
+        else:
+            return {
+                'title': event.get('title', 'Unknown Issue'),
+                'severity': event.get('severity', 'UNKNOWN'),
+                'impact': event.get('impact', 'Unknown Entity'),
+                'description': event.get('description', 'No details available')
+            }
+    except Exception as e:
+        logger.error(f"Error extracting problem info: {e}")
         return {
-            'title': event.get('ProblemTitle', 'Unknown Issue'),
-            'severity': event.get('ProblemSeverity', 'UNKNOWN'),
-            'impact': event.get('ImpactedEntity', 'Unknown Entity'),
-            'description': event.get('ProblemDetails', {}).get('problemDetailsSections', [{}])[0].get('content', 'No details available')
-        }
-    # For custom events
-    elif 'problem' in event:
-        return event['problem']
-    # Default structure
-    else:
-        return {
-            'title': event.get('title', 'Unknown Issue'),
-            'severity': event.get('severity', 'UNKNOWN'),
-            'impact': event.get('impact', 'Unknown Entity'),
-            'description': event.get('description', 'No details available')
+            'title': "Unknown Issue",
+            'severity': "UNKNOWN", 
+            'impact': "Unknown Entity",
+            'description': "No details available"
         }
 
 # Updated environment variables for generic repository configuration
