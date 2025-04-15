@@ -5,6 +5,8 @@ import base64
 import os
 import logging
 from typing import Dict, List, Optional, Any
+import datetime
+from datetime import datetime
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -118,6 +120,124 @@ class VCSService:
         except Exception as e:
             logger.error(f"Authentication error: {str(e)}")
             return False
+    def verify_repository_access(self, repo: str) -> bool:
+        """Verify that the repository exists and is accessible"""
+        try:
+            url = f"{self.api_base_url}/repos/{repo}"
+            logger.info(f"Checking repository existence at: {url}")
+            
+            response = self.session.get(url)
+            
+            if response.status_code == 200:
+                logger.info(f"Repository {repo} exists and is accessible")
+                return True
+            else:
+                error_message = response.json().get("message", "Unknown error")
+                logger.error(f"Repository access error: {error_message}")
+                return False
+        except Exception as e:
+            logger.error(f"Error verifying repository access: {str(e)}")
+            return False
+    
+    def check_token_permissions(self) -> Dict[str, bool]:
+        """Check permissions of the current token"""
+        try:
+            response = self.session.get(f"{self.api_base_url}/user")
+            if response.status_code != 200:
+                logger.error("Token authentication failed")
+                return {"authenticated": False}
+                
+            # Get scopes from headers
+            scopes = response.headers.get("X-OAuth-Scopes", "").split(", ")
+            
+            permissions = {
+                "authenticated": True,
+                "repo_read": "repo" in scopes or "public_repo" in scopes,
+                "repo_write": "repo" in scopes,
+                "user_read": "read:user" in scopes or "user" in scopes
+            }
+            
+            logger.info(f"Token permissions: {permissions}")
+            return permissions
+        except Exception as e:
+            logger.error(f"Error checking token permissions: {str(e)}")
+            return {"authenticated": False}
+    
+    def check_repository_content(self, repo: str, ref: str) -> bool:
+        """Check if repository has content via direct API call"""
+        try:
+            url = f"{self.api_base_url}/repos/{repo}/contents"
+            logger.info(f"Checking repository contents at: {url}")
+            
+            response = self.session.get(
+                url,
+                params={"ref": ref}
+            )
+            
+            logger.info(f"Repository contents response status: {response.status_code}")
+            
+            if response.status_code == 200:
+                contents = response.json()
+                if isinstance(contents, list):
+                    logger.info(f"Repository contains {len(contents)} items at root level")
+                    if len(contents) > 0:
+                        logger.info(f"Sample items: {[item.get('name') for item in contents[:5]]}")
+                    return len(contents) > 0
+                else:
+                    logger.error(f"Unexpected response format: {type(contents)}")
+                    return False
+            else:
+                error_message = response.json().get("message", "Unknown error")
+                logger.error(f"Error checking repository contents: {error_message}")
+                return False
+        except Exception as e:
+            logger.error(f"Exception checking repository contents: {str(e)}")
+            return False
+    
+    def get_default_branch(self, repo: str) -> str:
+        """Get the default branch for a repository"""
+        try:
+            url = f"{self.api_base_url}/repos/{repo}"
+            response = self.session.get(url)
+            
+            if response.status_code == 200:
+                default_branch = response.json().get("default_branch", "main")
+                logger.info(f"Repository default branch: {default_branch}")
+                return default_branch
+            else:
+                logger.error(f"Error getting repository info: {response.text}")
+                return "main"  # Fallback to main
+        except Exception as e:
+            logger.error(f"Exception getting default branch: {str(e)}")
+            return "main"
+    
+    def check_rate_limit(self) -> Dict[str, Any]:
+        """Check GitHub API rate limit status"""
+        try:
+            response = self.session.get(f"{self.api_base_url}/rate_limit")
+            
+            if response.status_code == 200:
+                limit_info = response.json()
+                core_limit = limit_info.get("resources", {}).get("core", {})
+                
+                remaining = core_limit.get("remaining", 0)
+                limit = core_limit.get("limit", 0)
+                reset_time = datetime.fromtimestamp(core_limit.get("reset", 0)).strftime('%Y-%m-%d %H:%M:%S')
+                
+                rate_info = {
+                    "limit": limit,
+                    "remaining": remaining,
+                    "reset_time": reset_time
+                }
+                
+                logger.info(f"GitHub API rate limit: {remaining}/{limit}, resets at {reset_time}")
+                return rate_info
+            else:
+                logger.error(f"Error checking rate limit: {response.text}")
+                return {"error": "Failed to check rate limit"}
+        except Exception as e:
+            logger.error(f"Exception checking rate limit: {str(e)}")
+            return {"error": str(e)}
     
     def get_repository_files(self, repo: str, ref: str = None) -> List[str]:
         """
@@ -303,27 +423,73 @@ class VCSService:
                 
                 # Check common error conditions
                 if "Not Found" in error_message:
-                    logger.error(f"Repository {repo} not found or token lacks access")
+                    logger.error(f"Repository {repo} not found, branch {ref} not found, or token lacks access")
                 elif "API rate limit exceeded" in error_message:
                     logger.error(f"GitHub API rate limit exceeded")
                 elif "No commit found for ref" in error_message:
                     logger.error(f"Branch or reference '{ref}' not found")
                     
-                return []
+                # Try direct contents API as fallback
+                logger.info("Trying alternate contents API as fallback")
+                return self._github_get_contents_alternative(repo, ref)
                 
             if response.status_code == 200:
                 data = response.json()
-                if not data.get("truncated", False):
-                    files = [item["path"] for item in data.get("tree", []) if item["type"] == "blob"]
-                    logger.info(f"GitHub API returned {len(files)} files")
-                    return files
+                if data.get("truncated", False):
+                    logger.warning("Repository tree is truncated, results may be incomplete")
+                    
+                files = [item["path"] for item in data.get("tree", []) if item["type"] == "blob"]
+                logger.info(f"GitHub API returned {len(files)} files")
+                
+                # Log a sample of files
+                if files:
+                    logger.info(f"Sample files: {files[:5]}")
+                
+                return files
             
-            # If truncated or failed, use iterative approach
+            # If we get here, try iterative approach
+            logger.info("Using iterative approach to get files")
             self._github_get_directory_contents(repo, "", ref, all_files)
+            logger.info(f"Iterative approach found {len(all_files)} files")
             return all_files
             
         except Exception as e:
             logger.error(f"Error getting GitHub files: {str(e)}")
+            # Try contents API as last resort
+            return self._github_get_contents_alternative(repo, ref)
+    
+    def _github_get_contents_alternative(self, repo: str, ref: str) -> List[str]:
+        """Alternative method to get files using contents API"""
+        logger.info(f"Using alternative contents API to get files")
+        all_files = []
+        
+        try:
+            response = self.session.get(
+                f"{self.api_base_url}/repos/{repo}/contents",
+                params={"ref": ref}
+            )
+            
+            if response.status_code != 200:
+                logger.error(f"Alternative method failed with status {response.status_code}")
+                return []
+                
+            items = response.json()
+            if not isinstance(items, list):
+                logger.error(f"Expected list response but got {type(items)}")
+                return []
+                
+            # Process root items
+            for item in items:
+                if item["type"] == "file":
+                    all_files.append(item["path"])
+                elif item["type"] == "dir":
+                    # Need to make additional requests for directories
+                    self._github_get_directory_contents(repo, item["path"], ref, all_files)
+                    
+            logger.info(f"Alternative method found {len(all_files)} files")
+            return all_files
+        except Exception as e:
+            logger.error(f"Error in alternative file retrieval: {str(e)}")
             return []
     
     def _github_get_directory_contents(self, repo: str, path: str, ref: str, all_files: List[str]):
