@@ -103,7 +103,15 @@ def lambda_handler(event, context):
         
         # Get a list of repository files
         repo = f"{repo_info['owner']}/{repo_info['repo']}"
+        logger.info(f"Attempting to get files from repository: {repo}")
         file_list = vcs_service.get_repository_files(repo)
+        logger.info(f"Retrieved {len(file_list)} files from GitHub repository")
+        
+        # Log some example files if any were found
+        if file_list:
+            logger.info(f"Sample files: {file_list[:5]}")
+        else:
+            logger.warning("No files found in repository - check GitHub token permissions and repo existence")
         
         # Filter files by extensions to reduce the search space
         filtered_files = filter_files_by_extensions(file_list)
@@ -193,23 +201,95 @@ def lambda_handler(event, context):
         # Analyze the problem
         if ENABLE_APM_TOOLS and apm_service:
             # First analysis
+            logger.info("Performing analysis with APM tools enabled")
             analysis = ai_service.analyze_problem_with_tools(problem_info, relevant_files, apm_service)
             
-            # Check if there are tool calls (if the AI requested more info)
+            # Extract tool calls
             tool_calls = []
+            for content in getattr(analysis, 'content', []):
+                if hasattr(content, 'type') and content.type == 'tool_use':
+                    tool_calls.append({
+                        'name': content.tool_use.name,
+                        'parameters': content.tool_use.input,
+                        'tool_use_id': content.tool_use.id
+                    })
             
-            # Extract tool calls from the analysis if present
-            if isinstance(analysis, dict) and 'tool_calls' in analysis:
-                tool_calls = analysis['tool_calls']
+            # If AI didn't use tools but we have service names, force tool usage
+            if not tool_calls and problem_info.get('service_names'):
+                logger.info("AI didn't use tools initially. Forcing tool usage...")
+                service_name = problem_info['service_names'][0]
+                
+                # Create a simulated tool call for logs
+                forced_tool_calls = [
+                    {
+                        'name': 'get_additional_logs',
+                        'parameters': {
+                            'service_name': service_name,
+                            'time_range': '1h',
+                            'log_level': 'ERROR'
+                        },
+                        'tool_use_id': 'forced_logs_call'
+                    },
+                    {
+                        'name': 'get_service_metrics',
+                        'parameters': {
+                            'service_name': service_name,
+                            'metric_type': 'error_rate',
+                            'time_range': '1h'
+                        },
+                        'tool_use_id': 'forced_metrics_call'
+                    }
+                ]
+                
+                # Process these forced tool calls
+                logger.info(f"Forcing APM tool usage for service: {service_name}")
+                tool_calls = forced_tool_calls
             
             # Process tool calls if any
             if tool_calls:
-                logger.info(f"AI requested additional information via tools: {tool_calls}")
+                logger.info(f"Processing {len(tool_calls)} APM tool calls")
                 updated_analysis = ai_service.process_tool_calls(tool_calls, apm_service, problem_info, relevant_files)
                 
                 if updated_analysis:
                     analysis = updated_analysis
-                    logger.info(f"Updated analysis with tool data: {json.dumps(analysis)}")
+                    logger.info("Analysis updated with APM data")
+                    
+                    # Extract error patterns from logs for additional file discovery
+                    if 'tool_results' in updated_analysis:
+                        error_patterns = []
+                        for result in updated_analysis.get('tool_results', []):
+                            if result.get('tool_name') == 'get_additional_logs':
+                                logs = result.get('result', [])
+                                for log in logs:
+                                    if isinstance(log, dict) and 'content' in log:
+                                        # Extract patterns from log content
+                                        log_content = log['content']
+                                        # Look for file paths and function names
+                                        file_patterns = re.findall(r'File "([^"]+)"', log_content)
+                                        func_patterns = re.findall(r'in ([a-zA-Z0-9_]+)\(', log_content)
+                                        error_patterns.extend(file_patterns + func_patterns)
+                        
+                        if error_patterns:
+                            logger.info(f"Found error patterns in logs: {error_patterns}")
+                            # Add these as components for a second file search
+                            problem_info['components'] = list(set(problem_info.get('components', []) + error_patterns))
+                            
+                            # Do a second component-based file search
+                            additional_files = get_component_based_files(vcs_service, repo, problem_info, file_list)
+                            
+                            # Add any new files to relevant_files
+                            for file_path, content in additional_files.items():
+                                if file_path not in relevant_files:
+                                    relevant_files[file_path] = content
+                            
+                            logger.info(f"Added {len(additional_files)} files based on log patterns")
+                            
+                            # Do one final analysis with the complete set of files
+                            if additional_files:
+                                final_analysis = ai_service.analyze_problem(problem_info, relevant_files)
+                                analysis = final_analysis
+                else:
+                    logger.warning("Failed to get updated analysis with APM data")
         else:
             analysis = ai_service.analyze_problem(problem_info, relevant_files)
         
@@ -349,6 +429,71 @@ def lambda_handler(event, context):
             'statusCode': 500,
             'body': json.dumps(f'Error: {str(e)}')
         }
+def get_component_based_files(vcs_service, repo, problem_info, file_list):
+    """Find files based on components extracted from problem info"""
+    components = problem_info.get('components', [])
+    service_names = problem_info.get('service_names', [])
+    # Add all components and service names together
+    search_terms = components + service_names
+    
+    # Also check for common error types in the description
+    description = problem_info.get('plain_description', problem_info.get('description', ''))
+    if any(term in description.lower() for term in ['exception', 'error', 'sql', 'query', 'database']):
+        search_terms.extend(['exception', 'error', 'sql', 'db', 'database', 'query'])
+    
+    if any(term in description.lower() for term in ['flask', 'api', 'endpoint']):
+        search_terms.extend(['flask', 'app.py', 'api', 'routes', 'views'])
+    
+    # Log what we're looking for
+    logger.info(f"Searching for files related to: {search_terms}")
+    
+    # Score and find files
+    scored_files = {}
+    
+    for file_path in file_list:
+        score = 0
+        file_lower = file_path.lower()
+        
+        # Score by file extension
+        if file_path.endswith('.py'):  # Python files get higher score for Flask issues
+            score += 3
+        elif any(file_path.endswith(ext) for ext in ['.js', '.java', '.go', '.ts']):
+            score += 2
+        elif any(file_path.endswith(ext) for ext in ['.yml', '.yaml', '.json', '.xml', '.conf']):
+            score += 1
+        
+        # Score by component matches in path
+        for term in search_terms:
+            if term and len(term) > 2 and term.lower() in file_lower:
+                score += 4
+        
+        # Important file patterns get extra points
+        if any(pattern in file_lower for pattern in ['app.py', 'main.py', 'config.py', 'settings.py', 'database.py']):
+            score += 5
+        
+        # Only get content for promising files
+        if score >= 3:
+            try:
+                content = vcs_service.get_file_content(repo, file_path)
+                
+                # Additional scoring based on content
+                content_lower = content.lower()
+                for term in search_terms:
+                    if term and len(term) > 2 and term.lower() in content_lower:
+                        score += 2
+                
+                # Store files with good scores
+                if score >= 5:
+                    scored_files[file_path] = {"content": content, "score": score}
+            except Exception as e:
+                logger.debug(f"Failed to get content for {file_path}: {e}")
+    
+    # Sort by score and return
+    sorted_files = sorted(scored_files.items(), key=lambda x: x[1]["score"], reverse=True)
+    logger.info(f"Found {len(sorted_files)} files using component matching")
+    
+    # Return as dictionary of path -> content (limited to top 10)
+    return {path: data["content"] for path, data in sorted_files[:10]}
 
 def extract_problem_info(event):
     """Extract structured problem info from the event"""
@@ -358,6 +503,7 @@ def extract_problem_info(event):
             # Extract service names from impacted entities
             service_names = []
             entity_ids = []
+            components = []
             
             for entity in event.get('impactedEntities', []):
                 if entity.get('type') == 'SERVICE':
@@ -367,13 +513,39 @@ def extract_problem_info(event):
             # Extract more detailed description if available
             description = event.get('problemDetails', 'No details available')
             
+            # Extract patterns from HTML description
+            import re
+            
+            # Extract code patterns (paths, functions) from <code> tags
+            code_patterns = re.findall(r'<code>([^<]+)</code>', description)
+            components.extend(code_patterns)
+            
+            # Extract error patterns from list items
+            error_patterns = re.findall(r'<li>([^<]+)</li>', description)
+            components.extend(error_patterns)
+            
+            # Extract plain text from HTML for better embedding
+            plain_description = re.sub(r'<[^>]+>', ' ', description)
+            plain_description = re.sub(r'\s+', ' ', plain_description).strip()
+            
+            # Extract potential keywords from title
+            title_components = re.findall(r'([A-Za-z][A-Za-z0-9]*(?:Service|API|App|Module))', event.get('problemTitle', ''))
+            components.extend(title_components)
+            
+            if "Flask" in description or "Flask" in event.get('problemTitle', ''):
+                components.append("Flask")
+                components.append("app.py")
+                components.append("routes")
+            
             return {
                 'title': event.get('problemTitle', 'Unknown Issue'),
                 'severity': event.get('severity', 'UNKNOWN'),
                 'impact': service_names[0] if service_names else "Unknown Service",
                 'description': description,
+                'plain_description': plain_description,
                 'service_names': service_names,
-                'entity_ids': entity_ids
+                'entity_ids': entity_ids,
+                'components': list(set(components))  # Deduplicate components
             }
         
         # For custom events and fallbacks
