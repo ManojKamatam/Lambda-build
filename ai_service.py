@@ -381,6 +381,192 @@ class AIService:
                     return {"action": "needs_more_info", "explanation": f"Error during analysis: {str(e)}"}
         
         return {"action": "needs_more_info", "explanation": "Failed to analyze the problem after multiple attempts."}
+
+    def process_tool_calls(self, tool_calls, apm_service, problem_info, files=None):
+        """
+        Process tool calls and get APM data
+        
+        Args:
+            tool_calls: List of tool calls from AI
+            apm_service: APM service to use
+            problem_info: Problem information
+            files: Relevant files (optional)
+            
+        Returns:
+            Updated analysis with tool results
+        """
+        import logging
+        logger = logging.getLogger()
+        
+        if not tool_calls or not apm_service:
+            return None
+            
+        logger.info(f"Processing {len(tool_calls)} tool calls")
+        
+        # Build messages for follow-up
+        follow_up_messages = []
+        
+        # Add initial problem information
+        problem_text = f"""
+        PROBLEM INFORMATION:
+        Title: {problem_info.get('title', 'N/A')}
+        Severity: {problem_info.get('severity', 'N/A')}
+        Impact: {problem_info.get('impact', 'N/A')}
+        Description: {problem_info.get('description', 'N/A')}
+        
+        IMPACTED SERVICES:
+        {', '.join(problem_info.get('service_names', ['Unknown']))}
+        """
+        
+        # Add file content if available
+        if files:
+            files_content = "\n\n".join([f"--- {filename} ---\n{content}" for filename, content in files.items()])
+            problem_text += f"\n\nSOURCE CODE FILES:\n{files_content}"
+        
+        follow_up_messages.append({"role": "user", "content": problem_text})
+        
+        # Process each tool call
+        for tool_call in tool_calls:
+            tool_name = tool_call.get('name')
+            params = tool_call.get('parameters', {})
+            tool_use_id = tool_call.get('tool_use_id', '')
+            
+            logger.info(f"Processing tool: {tool_name} for service: {params.get('service_name')}")
+            
+            # Add the tool call to the conversation
+            follow_up_messages.append({
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "tool_use_id": tool_use_id,
+                        "name": tool_name,
+                        "input": params
+                    }
+                ]
+            })
+            
+            # Execute the tool and get results
+            try:
+                if tool_name == 'get_additional_logs':
+                    logs = apm_service.get_logs(
+                        service_name=params.get('service_name'),
+                        time_range=params.get('time_range'),
+                        log_level=params.get('log_level', 'ERROR')
+                    )
+                    
+                    # Format logs for better readability
+                    if isinstance(logs, list):
+                        result = json.dumps(logs, indent=2)
+                        logger.info(f"Retrieved {len(logs)} log entries")
+                    else:
+                        result = str(logs)
+                        
+                elif tool_name == 'get_service_metrics':
+                    metrics = apm_service.get_metrics(
+                        service_name=params.get('service_name'),
+                        metric_type=params.get('metric_type'),
+                        time_range=params.get('time_range')
+                    )
+                    
+                    # Format metrics for better readability
+                    if isinstance(metrics, (list, dict)):
+                        result = json.dumps(metrics, indent=2)
+                        logger.info(f"Retrieved metrics data for {params.get('metric_type')}")
+                    else:
+                        result = str(metrics)
+                else:
+                    result = f"Unknown tool: {tool_name}"
+                    
+            except Exception as e:
+                logger.error(f"Error executing tool {tool_name}: {str(e)}")
+                result = f"Error retrieving data: {str(e)}"
+            
+            # Add the tool result to the conversation
+            follow_up_messages.append({
+                "role": "tool",
+                "tool_call_id": tool_use_id,
+                "content": result
+            })
+        
+        # Add final prompt
+        follow_up_messages.append({
+            "role": "user",
+            "content": """
+            Now that you have the additional information from the APM tools, please analyze the problem again 
+            and provide your final recommendation. Remember to include your decision in JSON format.
+            """
+        })
+        
+        # Enhanced system prompt for follow-up
+        system_prompt = """
+        You are a senior DevOps engineer tasked with analyzing and responding to system alerts.
+        You've now received the additional APM data you requested to help with your analysis.
+        
+        Based on ALL the information (problem details, code files, and APM data), determine the appropriate action:
+        
+        1. If this is a clear code issue that can be fixed directly, respond with ACTION: fix_code
+        2. If this requires a new feature or complex change, respond with ACTION: create_ticket
+        3. If you still need more information, respond with ACTION: needs_more_info
+        
+        For fix_code actions, include:
+        - A brief explanation of the issue
+        - The specific files that need changes
+        - What those changes should be
+        
+        For create_ticket actions, include:
+        - A suggested ticket title
+        - A detailed description of the issue
+        - Recommended priority (High/Medium/Low)
+        - Any suggested labels or components
+        
+        For needs_more_info actions, specify exactly what additional information you need.
+        
+        Present your final decision in a JSON format at the end of your response.
+        """
+        
+        # Make follow-up call with tool results
+        try:
+            follow_up = self.client.messages.create(
+                model="claude-3-opus-20240229",
+                system=system_prompt,
+                max_tokens=4000,
+                messages=follow_up_messages
+            )
+            
+            response_text = follow_up.content[0].text
+            logger.info("Received follow-up analysis with APM data")
+            
+            # Extract JSON from the response (same logic as in analyze_problem)
+            json_match = re.search(r'```json\s*(.*?)\s*```', response_text, re.DOTALL)
+            if json_match:
+                decision = json.loads(json_match.group(1))
+                return decision
+            else:
+                # Same fallback logic as in analyze_problem
+                try:
+                    json_like = re.search(r'({.*})', response_text.replace('\n', ' '), re.DOTALL)
+                    if json_like:
+                        return json.loads(json_like.group(1))
+                    else:
+                        if "ACTION: fix_code" in response_text:
+                            return {"action": "fix_code", "explanation": response_text}
+                        elif "ACTION: create_ticket" in response_text:
+                            return {"action": "create_ticket", "explanation": response_text}
+                        else:
+                            return {"action": "needs_more_info", "explanation": response_text}
+                except json.JSONDecodeError:
+                    # Last resort: infer from text
+                    if "fix" in response_text.lower() and "code" in response_text.lower():
+                        return {"action": "fix_code", "explanation": response_text}
+                    elif "ticket" in response_text.lower() or "issue" in response_text.lower():
+                        return {"action": "create_ticket", "explanation": response_text}
+                    else:
+                        return {"action": "needs_more_info", "explanation": response_text}
+                        
+        except Exception as e:
+            logger.error(f"Error in follow-up analysis: {str(e)}")
+            return {"action": "needs_more_info", "explanation": f"Error in follow-up analysis: {str(e)}"}
     
     def generate_code_fix(self, problem_info: Dict[str, Any], files: Dict[str, str], 
                           analysis: Dict[str, Any], max_retries: int = 3, 
