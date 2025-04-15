@@ -281,22 +281,42 @@ class VCSService:
             logger.error(f"Error creating PR: {str(e)}")
             raise
             
-    # Implementation methods for each VCS provider
     def _github_get_files(self, repo: str, ref: str) -> List[str]:
         """Get list of files from GitHub repository"""
         all_files = []
         
         try:
             # Try to use recursive tree API to get all files at once (most efficient)
+            url = f"{self.api_base_url}/repos/{repo}/git/trees/{ref}"
+            logger.info(f"Making GitHub API request to: {url}")
+            
             response = self.session.get(
-                f"{self.api_base_url}/repos/{repo}/git/trees/{ref}",
+                url,
                 params={"recursive": "1"}
             )
             
+            logger.info(f"GitHub API response status: {response.status_code}")
+            
+            if response.status_code != 200:
+                error_message = response.json().get("message", "Unknown error")
+                logger.error(f"GitHub API error: {error_message}")
+                
+                # Check common error conditions
+                if "Not Found" in error_message:
+                    logger.error(f"Repository {repo} not found or token lacks access")
+                elif "API rate limit exceeded" in error_message:
+                    logger.error(f"GitHub API rate limit exceeded")
+                elif "No commit found for ref" in error_message:
+                    logger.error(f"Branch or reference '{ref}' not found")
+                    
+                return []
+                
             if response.status_code == 200:
                 data = response.json()
                 if not data.get("truncated", False):
-                    return [item["path"] for item in data.get("tree", []) if item["type"] == "blob"]
+                    files = [item["path"] for item in data.get("tree", []) if item["type"] == "blob"]
+                    logger.info(f"GitHub API returned {len(files)} files")
+                    return files
             
             # If truncated or failed, use iterative approach
             self._github_get_directory_contents(repo, "", ref, all_files)
