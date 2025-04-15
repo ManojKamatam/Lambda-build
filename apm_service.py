@@ -122,11 +122,18 @@ class APMService:
         if not dynatrace_metric:
             raise ValueError(f"Unsupported metric type: {metric_type}")
         
-        # Set time range
-        if not time_range:
-            from_time = "now-1h"
+        if isinstance(time_range, str):
+            # Handle different time formats
+            if time_range.endswith('h'):
+                from_time = f"now-{time_range}"
+            elif time_range.endswith('m'):
+                from_time = f"now-{time_range}"
+            elif time_range.endswith('d'):
+                from_time = f"now-{time_range}"
+            else:
+                from_time = "now-1h"  # Default fallback
         else:
-            from_time = time_range
+            from_time = "now-1h"
         
         url = f"{self.base_url}/api/v2/metrics/query"
         params = {
