@@ -77,41 +77,102 @@ def lambda_handler(event, context):
         # Initialize services
         logger.info("Initializing services")
         vcs_service = VCSService()
-        ai_service = AIService(ANTHROPIC_API_KEY)
-        opensearch_service = OpenSearchService(OPENSEARCH_ENDPOINT) if OPENSEARCH_ENDPOINT else None
         
-        apm_service = APMService(
-            apm_type=APM_TYPE, 
-            api_key=APM_API_KEY, 
-            **APM_EXTRA_PARAMS
-        ) if ENABLE_APM_TOOLS else None
-        
-        logger.info(f"APM service initialized: {apm_service is not None}")
-        
-        ticket_service = TicketService(
-            ticket_type=TICKET_TYPE,
-            **TICKET_PARAMS
-        )
-        
-        # Extract problem information with enhanced component extraction
-        problem_info = extract_problem_info(event)
-        logger.info(f"Extracted problem info: {json.dumps(problem_info)}")
-        
-        # Extract repo info
-        repo_info = extract_repo_info(event)
-        logger.info(f"Repository info: {json.dumps(repo_info)}")
-        
-        if not repo_info or not all([repo_info.get('owner'), repo_info.get('repo')]):
-            return {
-                'statusCode': 400,
-                'body': json.dumps('Missing repository information')
-            }
-        
-        # Get a list of repository files
-        repo = f"{repo_info['owner']}/{repo_info['repo']}"
-        logger.info(f"Attempting to get files from repository: {repo}")
-        file_list = vcs_service.get_repository_files(repo)
-        logger.info(f"Retrieved {len(file_list)} files from GitHub repository")
+        # Add extensive debugging for GitHub access
+        if vcs_service.vcs_type == "github":
+            logger.info("--- Starting GitHub Repository Debug ---")
+            
+            # Check token permissions
+            permissions = vcs_service.check_token_permissions()
+            logger.info(f"Token permissions: {json.dumps(permissions)}")
+            
+            # Check rate limits
+            rate_limit = vcs_service.check_rate_limit()
+            logger.info(f"GitHub API rate limit status: {json.dumps(rate_limit)}")
+            
+            # Extract repo info
+            repo_info = extract_repo_info(event)
+            logger.info(f"Repository info: {json.dumps(repo_info)}")
+            
+            if not repo_info or not all([repo_info.get('owner'), repo_info.get('repo')]):
+                return {
+                    'statusCode': 400,
+                    'body': json.dumps('Missing repository information')
+                }
+                
+            # Get repository details
+            repo = f"{repo_info['owner']}/{repo_info['repo']}"
+            logger.info(f"Verifying repository access for: {repo}")
+            
+            # Check if repository exists and is accessible
+            repo_exists = vcs_service.verify_repository_access(repo)
+            logger.info(f"Repository exists and is accessible: {repo_exists}")
+            
+            if not repo_exists:
+                return {
+                    'statusCode': 404,
+                    'body': json.dumps(f'Repository {repo} not found or not accessible')
+                }
+                
+            # Get the default branch
+            default_branch = vcs_service.get_default_branch(repo)
+            logger.info(f"Repository default branch: {default_branch}")
+            
+            # Make sure we're using the correct branch
+            branch_to_use = repo_info.get('default_branch', default_branch)
+            logger.info(f"Using branch: {branch_to_use}")
+            
+            # Check if repository has content
+            has_content = vcs_service.check_repository_content(repo, branch_to_use)
+            logger.info(f"Repository has content: {has_content}")
+            
+            if not has_content:
+                return {
+                    'statusCode': 200,
+                    'body': json.dumps(f'Repository {repo} exists but has no content')
+                }
+                
+            logger.info(f"Attempting to get files from repository: {repo} using branch: {branch_to_use}")
+            file_list = vcs_service.get_repository_files(repo, branch_to_use)
+            logger.info(f"Retrieved {len(file_list)} files from GitHub repository")
+            
+            logger.info("--- End GitHub Repository Debug ---")
+        else:
+            # Initialize other services and continue with your existing code
+            ai_service = AIService(ANTHROPIC_API_KEY)
+            opensearch_service = OpenSearchService(OPENSEARCH_ENDPOINT) if OPENSEARCH_ENDPOINT else None
+            apm_service = APMService(
+                apm_type=APM_TYPE, 
+                api_key=APM_API_KEY, 
+                **APM_EXTRA_PARAMS
+            ) if ENABLE_APM_TOOLS else None
+            
+            logger.info(f"APM service initialized: {apm_service is not None}")
+            
+            ticket_service = TicketService(
+                ticket_type=TICKET_TYPE,
+                **TICKET_PARAMS
+            )
+            
+            # Extract problem information with enhanced component extraction
+            problem_info = extract_problem_info(event)
+            logger.info(f"Extracted problem info: {json.dumps(problem_info)}")
+            
+            # Extract repo info
+            repo_info = extract_repo_info(event)
+            logger.info(f"Repository info: {json.dumps(repo_info)}")
+            
+            if not repo_info or not all([repo_info.get('owner'), repo_info.get('repo')]):
+                return {
+                    'statusCode': 400,
+                    'body': json.dumps('Missing repository information')
+                }
+            
+            # Get a list of repository files
+            repo = f"{repo_info['owner']}/{repo_info['repo']}"
+            logger.info(f"Attempting to get files from repository: {repo}")
+            file_list = vcs_service.get_repository_files(repo)
+            logger.info(f"Retrieved {len(file_list)} files from GitHub repository")
         
         # Log some example files if any were found
         if file_list:
