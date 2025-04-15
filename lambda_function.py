@@ -14,51 +14,56 @@ from ticket_service import TicketService
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-# Add this near the top of lambda_function.py
-def get_secrets():
-    """Retrieve secrets from AWS Secrets Manager"""
-    import boto3
-    import json
-    
-    secret_name = "ai-incident-response-secrets"
-    region_name = os.environ.get("AWS_REGION", "us-east-1")
-    
-    # Create a Secrets Manager client
-    session = boto3.session.Session()
-    client = session.client(
-        service_name='secretsmanager',
-        region_name=region_name
-    )
-    
+def get_secret_param(param_name, default=None):
+    """Get a parameter from secrets or environment with proper error handling"""
     try:
-        get_secret_value_response = client.get_secret_value(
-            SecretId=secret_name
-        )
+        # Try to get from secrets first
+        if param_name in secrets:
+            value = secrets.get(param_name)
+            logger.info(f"Loaded {param_name} from Secrets Manager")
+            return value
+        # Fall back to environment variable
+        elif param_name in os.environ:
+            value = os.environ.get(param_name)
+            logger.info(f"Loaded {param_name} from environment variables")
+            return value
+        else:
+            logger.info(f"{param_name} not found in Secrets Manager or environment, using default")
+            return default
     except Exception as e:
-        logger.error(f"Error retrieving secrets: {str(e)}")
-        # Return empty dict as fallback
-        return {}
-    
-    # Decrypts secret using the associated KMS key if it exists
-    if 'SecretString' in get_secret_value_response:
-        secret = get_secret_value_response['SecretString']
-        return json.loads(secret)
-    else:
-        logger.error("Secret is in binary format, not supported")
-        return {}
-
-# Load secrets on module initialization
-try:
-    secrets = get_secrets()
-except Exception as e:
-    logger.warning(f"Could not load secrets, using fallbacks: {str(e)}")
-    secrets = {}
+        logger.error(f"Error loading {param_name}: {str(e)}")
+        return default
 
 # Environment configuration - now using secrets with fallbacks
 ANTHROPIC_API_KEY = secrets.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
 VCS_TYPE = os.environ.get("VCS_TYPE")
-VCS_TOKEN = secrets.get("VCS_TOKEN") or os.environ.get("VCS_TOKEN")
-VCS_EXTRA_PARAMS = json.loads(secrets.get("VCS_EXTRA_PARAMS", "{}")) or json.loads(os.environ.get("VCS_EXTRA_PARAMS", "{}"))
+# Modify the environment configuration to explicitly log token source
+VCS_TOKEN = None
+if "VCS_TOKEN" in secrets:
+    VCS_TOKEN = secrets.get("VCS_TOKEN")
+    logger.info("Loaded GitHub token from Secrets Manager")
+elif "VCS_TOKEN" in os.environ:
+    VCS_TOKEN = os.environ.get("VCS_TOKEN")
+    logger.info("Loaded GitHub token from environment variables")
+else:
+    logger.warning("No GitHub token found in Secrets Manager or environment variables")
+# Use safer JSON loading for secrets
+VCS_EXTRA_PARAMS = {}
+try:
+    if "VCS_EXTRA_PARAMS" in secrets:
+        if isinstance(secrets.get("VCS_EXTRA_PARAMS"), dict):
+            VCS_EXTRA_PARAMS = secrets.get("VCS_EXTRA_PARAMS")
+            logger.info("Loaded VCS_EXTRA_PARAMS as dictionary from Secrets Manager")
+        else:
+            # Try parsing as JSON string
+            VCS_EXTRA_PARAMS = json.loads(secrets.get("VCS_EXTRA_PARAMS"))
+            logger.info("Loaded VCS_EXTRA_PARAMS as JSON string from Secrets Manager")
+    elif "VCS_EXTRA_PARAMS" in os.environ:
+        VCS_EXTRA_PARAMS = json.loads(os.environ.get("VCS_EXTRA_PARAMS", "{}"))
+        logger.info("Loaded VCS_EXTRA_PARAMS from environment")
+except Exception as e:
+    logger.error(f"Error parsing VCS_EXTRA_PARAMS: {str(e)}, using empty dict")
+    VCS_EXTRA_PARAMS = {}
 OPENSEARCH_ENDPOINT = os.environ.get("OPENSEARCH_ENDPOINT")
 ENABLE_APM_TOOLS = os.environ.get("ENABLE_APM_TOOLS", "true").lower() == "true"
 APM_TYPE = os.environ.get("APM_TYPE")
@@ -77,8 +82,37 @@ def lambda_handler(event, context):
         # Initialize services
         logger.info("Initializing services")
         vcs_service = VCSService()
+        ai_service = AIService(ANTHROPIC_API_KEY)
+        opensearch_service = OpenSearchService(OPENSEARCH_ENDPOINT) if OPENSEARCH_ENDPOINT else None
+        apm_service = APMService(
+            apm_type=APM_TYPE, 
+            api_key=APM_API_KEY, 
+            **APM_EXTRA_PARAMS
+        ) if ENABLE_APM_TOOLS else None
         
-        # Add extensive debugging for GitHub access
+        logger.info(f"APM service initialized: {apm_service is not None}")
+        
+        ticket_service = TicketService(
+            ticket_type=TICKET_TYPE,
+            **TICKET_PARAMS
+        )
+        
+        # Extract problem information with enhanced component extraction
+        problem_info = extract_problem_info(event)
+        logger.info(f"Extracted problem info: {json.dumps(problem_info)}")
+        
+        # Extract repo info
+        repo_info = extract_repo_info(event)
+        logger.info(f"Repository info: {json.dumps(repo_info)}")
+        
+        if not repo_info or not all([repo_info.get('owner'), repo_info.get('repo')]):
+            return {
+                'statusCode': 400,
+                'body': json.dumps('Missing repository information')
+            }
+        
+        # Detailed GitHub repository debugging
+        repo = f"{repo_info['owner']}/{repo_info['repo']}"
         if vcs_service.vcs_type == "github":
             logger.info("--- Starting GitHub Repository Debug ---")
             
@@ -90,21 +124,8 @@ def lambda_handler(event, context):
             rate_limit = vcs_service.check_rate_limit()
             logger.info(f"GitHub API rate limit status: {json.dumps(rate_limit)}")
             
-            # Extract repo info
-            repo_info = extract_repo_info(event)
-            logger.info(f"Repository info: {json.dumps(repo_info)}")
-            
-            if not repo_info or not all([repo_info.get('owner'), repo_info.get('repo')]):
-                return {
-                    'statusCode': 400,
-                    'body': json.dumps('Missing repository information')
-                }
-                
-            # Get repository details
-            repo = f"{repo_info['owner']}/{repo_info['repo']}"
-            logger.info(f"Verifying repository access for: {repo}")
-            
             # Check if repository exists and is accessible
+            logger.info(f"Verifying repository access for: {repo}")
             repo_exists = vcs_service.verify_repository_access(repo)
             logger.info(f"Repository exists and is accessible: {repo_exists}")
             
@@ -131,60 +152,22 @@ def lambda_handler(event, context):
                     'statusCode': 200,
                     'body': json.dumps(f'Repository {repo} exists but has no content')
                 }
-                
-            logger.info(f"Attempting to get files from repository: {repo} using branch: {branch_to_use}")
-            file_list = vcs_service.get_repository_files(repo, branch_to_use)
-            logger.info(f"Retrieved {len(file_list)} files from GitHub repository")
-            
-            logger.info("--- End GitHub Repository Debug ---")
-        else:
-            # Initialize other services and continue with your existing code
-            ai_service = AIService(ANTHROPIC_API_KEY)
-            opensearch_service = OpenSearchService(OPENSEARCH_ENDPOINT) if OPENSEARCH_ENDPOINT else None
-            apm_service = APMService(
-                apm_type=APM_TYPE, 
-                api_key=APM_API_KEY, 
-                **APM_EXTRA_PARAMS
-            ) if ENABLE_APM_TOOLS else None
-            
-            logger.info(f"APM service initialized: {apm_service is not None}")
-            
-            ticket_service = TicketService(
-                ticket_type=TICKET_TYPE,
-                **TICKET_PARAMS
-            )
-            
-            # Extract problem information with enhanced component extraction
-            problem_info = extract_problem_info(event)
-            logger.info(f"Extracted problem info: {json.dumps(problem_info)}")
-            
-            # Extract repo info
-            repo_info = extract_repo_info(event)
-            logger.info(f"Repository info: {json.dumps(repo_info)}")
-            
-            if not repo_info or not all([repo_info.get('owner'), repo_info.get('repo')]):
-                return {
-                    'statusCode': 400,
-                    'body': json.dumps('Missing repository information')
-                }
-            
-            # Get a list of repository files
-            repo = f"{repo_info['owner']}/{repo_info['repo']}"
-            logger.info(f"Attempting to get files from repository: {repo}")
-            file_list = vcs_service.get_repository_files(repo)
-            logger.info(f"Retrieved {len(file_list)} files from GitHub repository")
         
-        # Log some example files if any were found
+        # Get a list of repository files
+        logger.info(f"Attempting to get files from repository: {repo}")
+        file_list = vcs_service.get_repository_files(repo)
+        logger.info(f"Retrieved {len(file_list)} files from GitHub repository")
+        
+        # Log a sample of files if available
         if file_list:
             logger.info(f"Sample files: {', '.join(file_list[:5])}")
         else:
-            logger.warning("No files found in repository - check GitHub token permissions and repo existence")
-            return {
-                'statusCode': 200,
-                'body': json.dumps('No files found in repository')
-            }
-        
-        # Try component-based file discovery first
+            logger.warning("No files found in repository")
+            
+        if vcs_service.vcs_type == "github":
+            logger.info("--- End GitHub Repository Debug ---")
+
+        # Try component-based file discovery
         component_files = get_component_based_files(vcs_service, repo, problem_info, file_list)
         logger.info(f"Found {len(component_files)} files using component matching")
         
