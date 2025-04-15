@@ -189,14 +189,29 @@ def lambda_handler(event, context):
                 )
             except Exception as e:
                 logger.warning(f"Failed to store vectors in OpenSearch: {str(e)}")
-        
+
         # Analyze the problem
         if ENABLE_APM_TOOLS and apm_service:
+            # First analysis
             analysis = ai_service.analyze_problem_with_tools(problem_info, relevant_files, apm_service)
+            
+            # Check if there are tool calls (if the AI requested more info)
+            tool_calls = []
+            
+            # Extract tool calls from the analysis if present
+            if isinstance(analysis, dict) and 'tool_calls' in analysis:
+                tool_calls = analysis['tool_calls']
+            
+            # Process tool calls if any
+            if tool_calls:
+                logger.info(f"AI requested additional information via tools: {tool_calls}")
+                updated_analysis = ai_service.process_tool_calls(tool_calls, apm_service, problem_info, relevant_files)
+                
+                if updated_analysis:
+                    analysis = updated_analysis
+                    logger.info(f"Updated analysis with tool data: {json.dumps(analysis)}")
         else:
             analysis = ai_service.analyze_problem(problem_info, relevant_files)
-        
-        logger.info(f"AI analysis result: {json.dumps(analysis)}")
         
         # Process based on analysis
         action = analysis.get('action', 'needs_more_info')
