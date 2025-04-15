@@ -263,9 +263,9 @@ class AIService:
                 for content in message.content:
                     if content.type == 'tool_use':
                         tool_calls.append({
-                            'name': content.tool_use.name,
-                            'parameters': content.tool_use.input,
-                            'tool_use_id': content.tool_use.id
+                            'name': content.name,  # Changed from content.tool_use.name
+                            'parameters': content.input,  # Changed from content.tool_use.input
+                            'tool_use_id': content.id  # Changed from content.tool_use.id
                         })
                 
                 # Log tool call information
@@ -303,6 +303,113 @@ class AIService:
                     return {"action": "needs_more_info", "explanation": f"Error during analysis: {str(e)}"}
         
         return {"action": "needs_more_info", "explanation": "Failed to analyze the problem after multiple attempts."}
+
+    def analyze_with_tool_results(self, problem_info, files, tool_results):
+        """
+        Analyze the problem with tool results using a proper follow-up message
+        structure that avoids the "Unexpected role" error.
+        """
+        try:
+            # Format tool results as user-friendly text
+            tool_results_text = ""
+            for result in tool_results:
+                tool_name = result.get('tool_name', 'unknown')
+                params = result.get('parameters', {})
+                result_data = result.get('result', 'No data')
+                
+                # Format the data nicely
+                tool_results_text += f"\n\n--- {tool_name.upper()} RESULTS ---\n"
+                tool_results_text += f"Parameters: {json.dumps(params)}\n\n"
+                
+                # Format result data based on type
+                if isinstance(result_data, (dict, list)):
+                    try:
+                        formatted_data = json.dumps(result_data, indent=2)
+                        # Truncate if too long
+                        if len(formatted_data) > 1000:
+                            formatted_data = formatted_data[:1000] + "...[truncated]"
+                        tool_results_text += formatted_data
+                    except:
+                        tool_results_text += str(result_data)[:1000]
+                else:
+                    tool_results_text += str(result_data)[:1000]
+            
+            # Create updated problem text with the tool results included
+            files_content = "\n\n".join([f"--- {filename} ---\n{content}" for filename, content in files.items()])
+            
+            # Create a new prompt with all information
+            updated_prompt = f"""
+            PROBLEM INFORMATION:
+            Title: {problem_info.get('title', 'N/A')}
+            Severity: {problem_info.get('severity', 'N/A')}
+            Impact: {problem_info.get('impact', 'N/A')}
+            Description: {problem_info.get('plain_description', problem_info.get('description', 'N/A'))}
+            
+            IMPACTED SERVICES:
+            {', '.join(problem_info.get('service_names', ['Unknown']))}
+            
+            TOOL RESULTS FROM APM SYSTEM:
+            {tool_results_text}
+            
+            SOURCE CODE FILES:
+            {files_content}
+            
+            Based on ALL this information (problem details, APM data, and code files), 
+            please provide your final analysis and recommendation.
+            """
+            
+            # System prompt for final analysis
+            system_prompt = """
+            You are a senior DevOps engineer analyzing system alerts with additional APM data.
+            
+            Based on ALL the information (problem details, code files, and APM data), determine the appropriate action:
+            
+            1. If this is a clear code issue that can be fixed directly, respond with ACTION: fix_code
+            2. If this requires a new feature or complex change, respond with ACTION: create_ticket
+            3. If you still need more information, respond with ACTION: needs_more_info
+            
+            Present your final decision in a JSON format at the end of your response, like:
+            ```json
+            {
+              "action": "fix_code|create_ticket|needs_more_info", 
+              "explanation": "Brief explanation of decision",
+              "details": {...action-specific details...}
+            }
+            ```
+            """
+            
+            # Make the API call
+            message = self.client.messages.create(
+                model="claude-3-opus-20240229",
+                system=system_prompt,
+                max_tokens=4000,
+                messages=[
+                    {"role": "user", "content": updated_prompt}
+                ]
+            )
+            
+            response_text = message.content[0].text
+            
+            # Extract JSON using same logic as analyze_problem
+            json_match = re.search(r'```json\s*(.*?)\s*```', response_text, re.DOTALL)
+            if json_match:
+                decision = json.loads(json_match.group(1))
+                # Add tool results to decision for later use
+                decision['tool_results'] = tool_results
+                return decision
+            else:
+                # Use parse_response helper
+                result = self._parse_response(response_text)
+                result['tool_results'] = tool_results
+                return result
+                
+        except Exception as e:
+            logger.error(f"Error in follow-up analysis: {str(e)}")
+            return {
+                "action": "needs_more_info", 
+                "explanation": f"Error during analysis with APM data: {str(e)}",
+                "tool_results": tool_results
+            }
     
     def _parse_response(self, response_text):
         """Parse Claude's response to extract decision"""
@@ -346,161 +453,69 @@ class AIService:
             
         logger.info(f"Processing {len(tool_calls)} tool calls")
         
-        # Build follow-up messages
-        follow_up_messages = []
+        # Collect tool results
         tool_results = []
-        
-        # Add initial problem info
-        problem_text = self._create_problem_text(problem_info, files or {})
-        follow_up_messages.append({"role": "user", "content": problem_text})
         
         # Process each tool call
         for tool_call in tool_calls:
-            tool_name = tool_call.get('name', '')
-            params = tool_call.get('parameters', {})
-            tool_use_id = tool_call.get('tool_use_id', '')
-            
-            logger.info(f"Processing tool: {tool_name} for service: {params.get('service_name')}")
-            
-            # Add the tool call to the conversation
-            follow_up_messages.append({
-                "role": "assistant", 
-                "content": [
-                    {
-                        "type": "tool_use",
-                        "tool_use_id": tool_use_id,
-                        "name": tool_name,
-                        "input": params
-                    }
-                ]
-            })
-            
-            # Execute the tool and get results
             try:
+                # Make sure we have a dictionary with the right attributes
+                if not isinstance(tool_call, dict):
+                    logger.error(f"Invalid tool call format: {tool_call}")
+                    continue
+                    
+                tool_name = tool_call.get('name', '')
+                params = tool_call.get('parameters', {})
+                
+                # Make sure parameters is a dictionary
+                if not isinstance(params, dict):
+                    if isinstance(params, str):
+                        try:
+                            params = json.loads(params)
+                        except:
+                            logger.error(f"Failed to parse parameters: {params}")
+                            params = {}
+                    else:
+                        params = {}
+                
+                service_name = params.get('service_name', '')
+                logger.info(f"Processing tool: {tool_name} for service: {service_name}")
+                
+                # Execute the tool and get results
                 result = None
                 if tool_name == 'get_additional_logs':
-                    logs = apm_service.get_logs(
-                        service_name=params.get('service_name'),
-                        time_range=params.get('time_range'),
+                    result = apm_service.get_logs(
+                        service_name=service_name,
+                        time_range=params.get('time_range', '1h'),
                         log_level=params.get('log_level', 'ERROR')
                     )
                     
-                    # Format logs for better readability
-                    if isinstance(logs, list):
-                        result = json.dumps(logs, indent=2)
-                        logger.info(f"Retrieved {len(logs)} log entries")
-                    else:
-                        result = str(logs)
-                        
-                    # Add to tool results for later use
-                    tool_results.append({
-                        "tool_name": tool_name,
-                        "result": logs,
-                        "parameters": params
-                    })
-                    
                 elif tool_name == 'get_service_metrics':
-                    metrics = apm_service.get_metrics(
-                        service_name=params.get('service_name'),
-                        metric_type=params.get('metric_type'),
-                        time_range=params.get('time_range')
+                    result = apm_service.get_metrics(
+                        service_name=service_name,
+                        metric_type=params.get('metric_type', 'error_rate'),
+                        time_range=params.get('time_range', '1h') 
                     )
-                    
-                    # Format metrics for better readability
-                    if isinstance(metrics, (list, dict)):
-                        result = json.dumps(metrics, indent=2)
-                        logger.info(f"Retrieved metrics data for {params.get('metric_type')}")
-                    else:
-                        result = str(metrics)
-                        
-                    # Add to tool results for later use
-                    tool_results.append({
-                        "tool_name": tool_name,
-                        "result": metrics,
-                        "parameters": params
-                    })
                     
                 else:
                     result = f"Unknown tool: {tool_name}"
                     logger.warning(f"Unknown tool requested: {tool_name}")
+                    
+                # Add to tool results for later use
+                tool_results.append({
+                    "tool_name": tool_name,
+                    "result": result,
+                    "parameters": params
+                })
+                    
             except Exception as e:
-                result = f"Error retrieving data: {str(e)}"
                 logger.error(f"Tool execution error: {str(e)}")
-            
-            # Add tool result to conversation
-            follow_up_messages.append({
-                "role": "tool",
-                "tool_call_id": tool_use_id,
-                "content": result
-            })
         
-        # Add final question
-        follow_up_messages.append({
-            "role": "user",
-            "content": "Based on this additional information from the APM tools, please analyze the problem again and provide your final recommendation. Remember to include your decision in JSON format."
-        })
+        # If we have tool results, make a follow-up analysis
+        if tool_results:
+            return self.analyze_with_tool_results(problem_info, files or {}, tool_results)
         
-        # Enhanced system prompt for follow-up
-        system_prompt = """
-        You are a senior DevOps engineer tasked with analyzing and responding to system alerts.
-        You've now received the additional APM data you requested to help with your analysis.
-        
-        Based on ALL the information (problem details, code files, and APM data), determine the appropriate action:
-        
-        1. If this is a clear code issue that can be fixed directly, respond with ACTION: fix_code
-        2. If this requires a new feature or complex change, respond with ACTION: create_ticket
-        3. If you still need more information, respond with ACTION: needs_more_info
-        
-        For fix_code actions, include:
-        - A brief explanation of the issue
-        - The specific files that need changes
-        - What those changes should be
-        
-        For create_ticket actions, include:
-        - A suggested ticket title
-        - A detailed description of the issue
-        - Recommended priority (High/Medium/Low)
-        - Any suggested labels or components
-        
-        For needs_more_info actions, specify exactly what additional information you need.
-        
-        Present your final decision in a JSON format at the end of your response, like:
-        ```json
-        {
-          "action": "fix_code|create_ticket|needs_more_info", 
-          "explanation": "Brief explanation of decision",
-          "details": {...action-specific details...}
-        }
-        ```
-        """
-        
-        # Make follow-up call with tool results
-        try:
-            follow_up = self.client.messages.create(
-                model="claude-3-opus-20240229",
-                system=system_prompt,
-                max_tokens=4000,
-                messages=follow_up_messages
-            )
-            
-            response_text = follow_up.content[0].text
-            logger.info("Received follow-up analysis with APM data")
-            
-            # Extract JSON using same logic as analyze_problem
-            json_match = re.search(r'```json\s*(.*?)\s*```', response_text, re.DOTALL)
-            if json_match:
-                decision = json.loads(json_match.group(1))
-                # Add tool results to decision for later use
-                decision['tool_results'] = tool_results
-                return decision
-            else:
-                # Use parse_response helper
-                result = self._parse_response(response_text)
-                result['tool_results'] = tool_results
-                return result
-        except Exception as e:
-            logger.error(f"Error in follow-up analysis: {str(e)}")
-            return {"action": "needs_more_info", "explanation": f"Error: {str(e)}", "tool_results": tool_results}
+        return None
     
     def generate_code_fix(self, problem_info: Dict[str, Any], files: Dict[str, str], 
                           analysis: Dict[str, Any], max_retries: int = 3, 
