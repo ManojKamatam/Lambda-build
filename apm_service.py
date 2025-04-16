@@ -107,8 +107,18 @@ class APMService:
                 # Default to 1 hour if format not recognized
                 start_time = end_time - timedelta(hours=1)
             
-            from_time = start_time.isoformat() + "Z"
-            to_time = end_time.isoformat() + "Z"
+            # Format timestamps with millisecond precision (3 decimal places)
+            from_time = start_time.isoformat().split('.')[0]
+            if start_time.microsecond > 0:
+                # Add millisecond precision (3 decimal places)
+                from_time += f".{start_time.microsecond // 1000:03d}"
+            from_time += "Z"
+            
+            to_time = end_time.isoformat().split('.')[0]
+            if end_time.microsecond > 0:
+                # Add millisecond precision (3 decimal places)
+                to_time += f".{end_time.microsecond // 1000:03d}"
+            to_time += "Z"
         # Handle dictionary format
         elif isinstance(time_range, dict) and "start" in time_range and "end" in time_range:
             from_time = time_range["start"]
@@ -117,8 +127,17 @@ class APMService:
         else:
             end_time = datetime.utcnow()
             start_time = end_time - timedelta(hours=1)
-            from_time = start_time.isoformat() + "Z"
-            to_time = end_time.isoformat() + "Z"
+            
+            # Format timestamps with millisecond precision
+            from_time = start_time.isoformat().split('.')[0]
+            if start_time.microsecond > 0:
+                from_time += f".{start_time.microsecond // 1000:03d}"
+            from_time += "Z"
+            
+            to_time = end_time.isoformat().split('.')[0]
+            if end_time.microsecond > 0:
+                to_time += f".{end_time.microsecond // 1000:03d}"
+            to_time += "Z"
         
         # Format the query for Dynatrace Logs API
         query = f"service:{service_name} AND level:{log_level}"
