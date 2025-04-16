@@ -27,10 +27,22 @@ class APMService:
             raise ValueError("Dynatrace requires 'base_url' parameter")
         
         self.session = requests.Session()
-        self.session.headers.update({
-            "Authorization": f"Api-Token {self.api_key}",
-            "Content-Type": "application/json"
-        })
+        
+        # Check if Grail is enabled (using OAuth)
+        self.uses_grail = self.extra_params.get("uses_grail", False)
+        
+        if self.uses_grail:
+            # For Grail-enabled environments, use OAuth Bearer token
+            self.session.headers.update({
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json"
+            })
+        else:
+            # For traditional environments, use API token
+            self.session.headers.update({
+                "Authorization": f"Api-Token {self.api_key}",
+                "Content-Type": "application/json"
+            })
     
     def _init_datadog(self):
         """Initialize Datadog client"""
