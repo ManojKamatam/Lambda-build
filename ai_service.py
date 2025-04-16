@@ -436,82 +436,70 @@ class AIService:
                 return {"action": "needs_more_info", "explanation": response_text}
     
     def process_tool_calls(self, tool_calls, apm_service, problem_info, files=None):
-        """
-        Process tool calls and get APM data
-        
-        Args:
-            tool_calls: List of tool calls from AI
-            apm_service: APM service to use
-            problem_info: Problem information
-            files: Relevant files (optional)
-            
-        Returns:
-            Updated analysis with tool results
-        """
+        """Process tool calls and get APM data"""
         if not tool_calls or not apm_service:
             return None
             
         logger.info(f"Processing {len(tool_calls)} tool calls")
-        
-        # Collect tool results
         tool_results = []
         
-        # Process each tool call
         for tool_call in tool_calls:
             try:
-                # Make sure we have a dictionary with the right attributes
-                if not isinstance(tool_call, dict):
-                    logger.error(f"Invalid tool call format: {tool_call}")
-                    continue
-                    
+                # Extract tool information with safer access
                 tool_name = tool_call.get('name', '')
-                params = tool_call.get('parameters', {})
+                parameters = tool_call.get('parameters', {})
                 
-                # Make sure parameters is a dictionary
-                if not isinstance(params, dict):
-                    if isinstance(params, str):
-                        try:
-                            params = json.loads(params)
-                        except:
-                            logger.error(f"Failed to parse parameters: {params}")
-                            params = {}
-                    else:
-                        params = {}
+                # Handle string parameters (convert to dict if needed)
+                if isinstance(parameters, str):
+                    try:
+                        parameters = json.loads(parameters)
+                    except:
+                        logger.error(f"Failed to parse parameters string: {parameters}")
+                        parameters = {}
+                        
+                # Get service name directly (no .get on parameters if it's a string)
+                service_name = parameters.get('service_name') if isinstance(parameters, dict) else ''
                 
-                service_name = params.get('service_name', '')
                 logger.info(f"Processing tool: {tool_name} for service: {service_name}")
                 
-                # Execute the tool and get results
+                # Execute the appropriate tool with explicit parameter extraction
                 result = None
                 if tool_name == 'get_additional_logs':
+                    # Extract parameters safely
+                    time_range = parameters.get('time_range', '1h') if isinstance(parameters, dict) else '1h'
+                    log_level = parameters.get('log_level', 'ERROR') if isinstance(parameters, dict) else 'ERROR'
+                    
+                    # Call with explicit parameters rather than passing parameters dict
                     result = apm_service.get_logs(
                         service_name=service_name,
-                        time_range=params.get('time_range', '1h'),
-                        log_level=params.get('log_level', 'ERROR')
+                        time_range=time_range,
+                        log_level=log_level
                     )
                     
                 elif tool_name == 'get_service_metrics':
+                    # Extract parameters safely
+                    metric_type = parameters.get('metric_type', 'error_rate') if isinstance(parameters, dict) else 'error_rate'
+                    time_range = parameters.get('time_range', '1h') if isinstance(parameters, dict) else '1h'
+                    
+                    # Call with explicit parameters
                     result = apm_service.get_metrics(
                         service_name=service_name,
-                        metric_type=params.get('metric_type', 'error_rate'),
-                        time_range=params.get('time_range', '1h') 
+                        metric_type=metric_type,
+                        time_range=time_range
                     )
                     
-                else:
-                    result = f"Unknown tool: {tool_name}"
-                    logger.warning(f"Unknown tool requested: {tool_name}")
-                    
-                # Add to tool results for later use
+                # Record the result
                 tool_results.append({
                     "tool_name": tool_name,
                     "result": result,
-                    "parameters": params
+                    "parameters": parameters
                 })
                     
             except Exception as e:
                 logger.error(f"Tool execution error: {str(e)}")
+                # Continue with next tool if one fails
         
-        # If we have tool results, make a follow-up analysis
+        # Process the results
         if tool_results:
             return self.analyze_with_tool_results(problem_info, files or {}, tool_results)
         
