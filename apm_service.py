@@ -80,14 +80,45 @@ class APMService:
     
     def _dynatrace_get_logs(self, service_name, time_range=None, log_level="ERROR"):
         """Get logs from Dynatrace"""
-        # Calculate time range if not provided
-        if not time_range:
+        # Parse time_range string if provided in that format
+        if isinstance(time_range, str):
+            end_time = datetime.utcnow()
+            
+            # Handle different time formats like "1h", "30m", etc.
+            if time_range.endswith('h'):
+                try:
+                    hours = int(time_range[:-1])
+                    start_time = end_time - timedelta(hours=hours)
+                except ValueError:
+                    start_time = end_time - timedelta(hours=1)
+            elif time_range.endswith('m'):
+                try:
+                    minutes = int(time_range[:-1])
+                    start_time = end_time - timedelta(minutes=minutes)
+                except ValueError:
+                    start_time = end_time - timedelta(hours=1)
+            elif time_range.endswith('d'):
+                try:
+                    days = int(time_range[:-1])
+                    start_time = end_time - timedelta(days=days)
+                except ValueError:
+                    start_time = end_time - timedelta(hours=1)
+            else:
+                # Default to 1 hour if format not recognized
+                start_time = end_time - timedelta(hours=1)
+            
+            from_time = start_time.isoformat() + "Z"
+            to_time = end_time.isoformat() + "Z"
+        # Handle dictionary format
+        elif isinstance(time_range, dict) and "start" in time_range and "end" in time_range:
+            from_time = time_range["start"]
+            to_time = time_range["end"]
+        # Default case
+        else:
             end_time = datetime.utcnow()
             start_time = end_time - timedelta(hours=1)
-            time_range = {
-                "start": start_time.isoformat() + "Z",
-                "end": end_time.isoformat() + "Z"
-            }
+            from_time = start_time.isoformat() + "Z"
+            to_time = end_time.isoformat() + "Z"
         
         # Format the query for Dynatrace Logs API
         query = f"service:{service_name} AND level:{log_level}"
@@ -95,8 +126,8 @@ class APMService:
         url = f"{self.base_url}/api/v2/logs/search"
         payload = {
             "query": query,
-            "from": time_range.get("start"),
-            "to": time_range.get("end"),
+            "from": from_time,
+            "to": to_time,
             "limit": 100
         }
         
