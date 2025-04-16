@@ -31,19 +31,12 @@ class APMService:
         # Check if Grail is enabled (using OAuth)
         self.uses_grail = self.extra_params.get("uses_grail", False)
         
-        if self.uses_grail:
-            # For Grail-enabled environments, use OAuth Bearer token
-            self.session.headers.update({
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json"
-            })
-        else:
-            # For traditional environments, use API token
-            self.session.headers.update({
-                "Authorization": f"Api-Token {self.api_key}",
-                "Content-Type": "application/json"
-            })
-    
+        # Default to API token authentication
+        auth_type = "Bearer" if self.uses_grail else "Api-Token"
+        self.session.headers.update({
+            "Authorization": f"{auth_type} {self.api_key}",
+            "Content-Type": "application/json"
+        })
     def _init_datadog(self):
         """Initialize Datadog client"""
         self.api_key = self.api_key
@@ -153,7 +146,7 @@ class APMService:
         
         # Format the query for Dynatrace Logs API
         query = f"service:{service_name} AND level:{log_level}"
-        
+    
         url = f"{self.base_url}/api/v2/logs/search"
         params = {
             "query": query,
@@ -162,10 +155,31 @@ class APMService:
             "limit": 100
         }
         
-        # Changed from POST with json payload to GET with query parameters
+        # First attempt with current authentication
         response = self.session.get(url, params=params)
         
+        # If we get an OAuth token missing error and we're not already using OAuth, 
+        # try switching to OAuth authentication and retry
+        if (response.status_code == 401 and 
+            "OAuth token is missing" in response.text and 
+            not self.uses_grail):
+            
+            print("Detected Grail environment, switching to OAuth authentication")
+            self.uses_grail = True
+            self.session.headers.update({
+                "Authorization": f"Bearer {self.api_key}"
+            })
+            
+            # Retry the request with OAuth authentication
+            response = self.session.get(url, params=params)
+        
         if response.status_code != 200:
+            if response.status_code == 401 and "OAuth token is missing" in response.text:
+                raise Exception(
+                    "Failed to get Dynatrace logs: OAuth token is required for Grail environments. "
+                    "Please provide an OAuth token with storage:logs:read and storage:buckets:read scopes "
+                    "and set uses_grail=True in extra_params or APM_EXTRA_PARAMS environment variable."
+                )
             raise Exception(f"Failed to get Dynatrace logs: {response.text}")
         
         return response.json().get("logs", [])
