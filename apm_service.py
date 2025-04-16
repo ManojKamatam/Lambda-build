@@ -123,7 +123,7 @@ class APMService:
         # Format the query for Dynatrace Logs API
         query = f"service:{service_name} AND level:{log_level}"
         
-        url = f"{self.base_url}/api/v2/logs"
+        url = f"{self.base_url}/api/v2/logs/search"
         params = {
             "query": query,
             "from": from_time,
