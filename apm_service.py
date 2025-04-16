@@ -123,15 +123,16 @@ class APMService:
         # Format the query for Dynatrace Logs API
         query = f"service:{service_name} AND level:{log_level}"
         
-        url = f"{self.base_url}/api/v2/logs/search"
-        payload = {
+        url = f"{self.base_url}/api/v2/logs"
+        params = {
             "query": query,
             "from": from_time,
             "to": to_time,
             "limit": 100
         }
         
-        response = self.session.post(url, json=payload)
+        # Changed from POST with json payload to GET with query parameters
+        response = self.session.get(url, params=params)
         
         if response.status_code != 200:
             raise Exception(f"Failed to get Dynatrace logs: {response.text}")
