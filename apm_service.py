@@ -232,7 +232,7 @@ class APMService:
                     "Authorization": original_auth
                 })
     
-    if response.status_code != 200:
-        raise Exception(f"Failed to get Dynatrace metrics: {response.text}")
-    
-    return response.json().get("result", [])
+        if response.status_code != 200:
+            raise Exception(f"Failed to get Dynatrace metrics: {response.text}")
+        
+        return response.json().get("result", [])
