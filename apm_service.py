@@ -21,7 +21,7 @@ class APMService:
             raise ValueError(f"Unsupported APM type: {self.apm_type}")
     
     def _init_dynatrace(self):
-        """Initialize Dynatrace client"""
+        """Initialize Dynatrace client with OAuth support"""
         self.base_url = self.extra_params.get("base_url")
         if not self.base_url:
             raise ValueError("Dynatrace requires 'base_url' parameter")
@@ -31,12 +31,51 @@ class APMService:
         # Check if Grail is enabled (using OAuth)
         self.uses_grail = self.extra_params.get("uses_grail", False)
         
-        # Default to API token authentication
-        auth_type = "Bearer" if self.uses_grail else "Api-Token"
-        self.session.headers.update({
-            "Authorization": f"{auth_type} {self.api_key}",
-            "Content-Type": "application/json"
-        })
+        if self.uses_grail:
+            # Get client credentials from extra_params
+            client_id = self.extra_params.get("client_id")
+            client_secret = self.api_key  # Use API key as client secret
+            
+            if client_id and client_secret:
+                # Get OAuth token
+                token_url = "https://sso.dynatrace.com/sso/oauth2/token"
+                token_data = {
+                    "grant_type": "client_credentials",
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "scope": "storage:logs:read storage:buckets:read"
+                }
+                
+                token_headers = {
+                    "Content-Type": "application/x-www-form-urlencoded"
+                }
+                
+                try:
+                    response = requests.post(token_url, headers=token_headers, data=token_data)
+                    if response.status_code == 200:
+                        oauth_token = response.json().get("access_token")
+                        self.session.headers.update({
+                            "Authorization": f"Bearer {oauth_token}",
+                            "Content-Type": "application/json"
+                        })
+                        logger.info("Successfully obtained Dynatrace OAuth token")
+                        return
+                    else:
+                        logger.warning(f"Failed to get OAuth token: {response.text}")
+                except Exception as e:
+                    logger.error(f"Error getting OAuth token: {str(e)}")
+            
+            # Fall back to using API key directly as Bearer token
+            self.session.headers.update({
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json"
+            })
+        else:
+            # Default to API token authentication
+            self.session.headers.update({
+                "Authorization": f"Api-Token {self.api_key}",
+                "Content-Type": "application/json"
+            })
     def _init_datadog(self):
         """Initialize Datadog client"""
         self.api_key = self.api_key
