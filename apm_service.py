@@ -274,13 +274,13 @@ class APMService:
         return response.json().get("logs", [])
     
     def _dynatrace_get_metrics(self, service_name, metric_type, time_range=None):
-        """Get metrics from Dynatrace with auth fallback"""
+        """Get metrics from Dynatrace"""
         # Map generic metric types to Dynatrace metrics
         metric_mapping = {
             "cpu": "builtin:host.cpu.usage",
             "memory": "builtin:host.mem.usage",
             "latency": "builtin:service.response.time",
-            "error_rate": "builtin:service.errors.total.rate", 
+            "error_rate": "builtin:service.errors.total.rate",
             "throughput": "builtin:service.requestCount.total"
         }
         
@@ -288,10 +288,13 @@ class APMService:
         if not dynatrace_metric:
             raise ValueError(f"Unsupported metric type: {metric_type}")
         
-        # Format time range
         if isinstance(time_range, str):
             # Handle different time formats
-            if time_range.endswith('h') or time_range.endswith('m') or time_range.endswith('d'):
+            if time_range.endswith('h'):
+                from_time = f"now-{time_range}"
+            elif time_range.endswith('m'):
+                from_time = f"now-{time_range}"
+            elif time_range.endswith('d'):
                 from_time = f"now-{time_range}"
             else:
                 from_time = "now-1h"  # Default fallback
@@ -305,25 +308,24 @@ class APMService:
             "resolution": "Inf"
         }
         
-        # First try with current auth (should be API token)
-        response = self.session.get(url, params=params)
+        # Save current auth header which may be OAuth
+        current_auth = self.session.headers.get("Authorization", "")
         
-        # If it fails and we have OAuth token, try with that
-        if response.status_code == 401 and self.oauth_token:
-            logger.info("API token failed for metrics, trying OAuth token")
-            original_auth = self.session.headers.get("Authorization")
-            try:
-                self.session.headers.update({
-                    "Authorization": f"Bearer {self.oauth_token}"
-                })
-                response = self.session.get(url, params=params)
-            finally:
-                # Restore original auth
-                self.session.headers.update({
-                    "Authorization": original_auth
-                })
-    
-        if response.status_code != 200:
-            raise Exception(f"Failed to get Dynatrace metrics: {response.text}")
+        # Temporarily switch to API token for metrics
+        self.session.headers.update({
+            "Authorization": f"Api-Token {self.api_key}"
+        })
         
-        return response.json().get("result", [])
+        try:
+            logger.info(f"Getting Dynatrace metrics with Api-Token authentication")
+            response = self.session.get(url, params=params)
+            
+            if response.status_code != 200:
+                raise Exception(f"Failed to get Dynatrace metrics: {response.text}")
+            
+            return response.json().get("result", [])
+        finally:
+            # Restore original auth header
+            self.session.headers.update({
+                "Authorization": current_auth
+            })
