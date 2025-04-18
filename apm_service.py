@@ -301,9 +301,14 @@ class APMService:
         else:
             from_time = "now-1h"
         
+        # Clean service name of any quotes
+        safe_service_name = service_name.replace("'", "").replace('"', '')
+        
         url = f"{self.base_url}/api/v2/metrics/query"
+        
+        # Use double quotes in the filter (Dynatrace syntax requirement)
         params = {
-            "metricSelector": f"{dynatrace_metric}:filter(entity.name:'{service_name}')",
+            "metricSelector": f'{dynatrace_metric}:filter(entity.name="{safe_service_name}")',
             "from": from_time,
             "resolution": "Inf"
         }
@@ -317,11 +322,32 @@ class APMService:
         })
         
         try:
-            logger.info(f"Getting Dynatrace metrics with Api-Token authentication")
+            logger.info(f"Getting Dynatrace metrics with Api-Token authentication for service: {safe_service_name}")
             response = self.session.get(url, params=params)
             
             if response.status_code != 200:
-                raise Exception(f"Failed to get Dynatrace metrics: {response.text}")
+                # Try alternative approach with entitySelector
+                logger.info("First attempt failed, trying with entitySelector")
+                alt_params = {
+                    "metricSelector": dynatrace_metric,
+                    "entitySelector": f'type(SERVICE),entityName("{safe_service_name}")',
+                    "from": from_time,
+                    "resolution": "Inf"
+                }
+                response = self.session.get(url, params=alt_params)
+                
+                if response.status_code != 200:
+                    # Try once more with no filter as last resort
+                    logger.info("Second attempt failed, trying with no filter")
+                    simple_params = {
+                        "metricSelector": dynatrace_metric,
+                        "from": from_time,
+                        "resolution": "Inf"
+                    }
+                    response = self.session.get(url, params=simple_params)
+                    
+                    if response.status_code != 200:
+                        raise Exception(f"Failed to get Dynatrace metrics: {response.text}")
             
             return response.json().get("result", [])
         finally:
