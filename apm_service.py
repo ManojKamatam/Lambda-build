@@ -272,6 +272,145 @@ class APMService:
             raise Exception(f"Failed to get Dynatrace logs: {response.text}")
         
         return response.json().get("logs", [])
+
+    def _datadog_get_logs(self, service_name, time_range=None, log_level="ERROR"):
+        """Get logs from Datadog"""
+        # Parse time_range string if provided in that format
+        if isinstance(time_range, str):
+            end_time = datetime.utcnow()
+            
+            # Handle different time formats like "1h", "30m", etc.
+            if time_range.endswith('h'):
+                try:
+                    hours = int(time_range[:-1])
+                    start_time = end_time - timedelta(hours=hours)
+                except ValueError:
+                    start_time = end_time - timedelta(hours=1)
+            elif time_range.endswith('m'):
+                try:
+                    minutes = int(time_range[:-1])
+                    start_time = end_time - timedelta(minutes=minutes)
+                except ValueError:
+                    start_time = end_time - timedelta(hours=1)
+            elif time_range.endswith('d'):
+                try:
+                    days = int(time_range[:-1])
+                    start_time = end_time - timedelta(days=days)
+                except ValueError:
+                    start_time = end_time - timedelta(hours=1)
+            else:
+                # Default to 1 hour if format not recognized
+                start_time = end_time - timedelta(hours=1)
+            
+            # Convert to Unix timestamps in milliseconds for Datadog
+            from_time = int(start_time.timestamp() * 1000)
+            to_time = int(end_time.timestamp() * 1000)
+        # Handle dictionary format
+        elif isinstance(time_range, dict) and "start" in time_range and "end" in time_range:
+            try:
+                # Check if these are timestamps or ISO strings
+                if isinstance(time_range["start"], (int, float)):
+                    from_time = int(time_range["start"] * 1000) if time_range["start"] < 10000000000 else int(time_range["start"])
+                    to_time = int(time_range["end"] * 1000) if time_range["end"] < 10000000000 else int(time_range["end"])
+                else:
+                    # Parse ISO strings
+                    from_time = int(datetime.fromisoformat(time_range["start"].replace('Z', '+00:00')).timestamp() * 1000)
+                    to_time = int(datetime.fromisoformat(time_range["end"].replace('Z', '+00:00')).timestamp() * 1000)
+            except Exception as e:
+                logger.error(f"Error parsing time range: {e}")
+                # Default to last hour
+                end_time = datetime.utcnow()
+                start_time = end_time - timedelta(hours=1)
+                from_time = int(start_time.timestamp() * 1000)
+                to_time = int(end_time.timestamp() * 1000)
+        # Default case
+        else:
+            end_time = datetime.utcnow()
+            start_time = end_time - timedelta(hours=1)
+            from_time = int(start_time.timestamp() * 1000)
+            to_time = int(end_time.timestamp() * 1000)
+        
+        # Build query for Datadog Logs API
+        query = f"service:{service_name} status:{log_level.lower()}"
+        
+        # Datadog logs API endpoint
+        url = "https://api.datadoghq.com/api/v2/logs/events"
+        
+        params = {
+            "filter[query]": query,
+            "filter[from]": from_time,
+            "filter[to]": to_time,
+            "page[limit]": 100
+        }
+        
+        logger.info(f"Getting Datadog logs for service: {service_name}, level: {log_level}")
+        response = self.session.get(url, params=params)
+        
+        if response.status_code != 200:
+            raise Exception(f"Failed to get Datadog logs: {response.text}")
+        
+        logs_data = response.json()
+        return logs_data.get("data", [])
+    
+    def _datadog_get_metrics(self, service_name, metric_type, time_range=None):
+        """Get metrics from Datadog"""
+        # Map generic metric types to Datadog metrics
+        metric_mapping = {
+            "cpu": f"avg:system.cpu.user{{service:{service_name}}}",
+            "memory": f"avg:system.mem.used{{service:{service_name}}}",
+            "latency": f"avg:trace.http.request.duration{{service:{service_name}}}",
+            "error_rate": f"sum:trace.servlet.request.errors{{service:{service_name}}}.as_count()",
+            "throughput": f"sum:trace.servlet.request.hits{{service:{service_name}}}.as_count()"
+        }
+        
+        datadog_metric = metric_mapping.get(metric_type)
+        if not datadog_metric:
+            raise ValueError(f"Unsupported metric type: {metric_type}")
+        
+        # Parse time range
+        now = int(datetime.utcnow().timestamp())
+        
+        if isinstance(time_range, str):
+            # Handle different time formats
+            if time_range.endswith('h'):
+                try:
+                    hours = int(time_range[:-1])
+                    from_time = now - (hours * 3600)
+                except ValueError:
+                    from_time = now - 3600  # Default 1 hour
+            elif time_range.endswith('m'):
+                try:
+                    minutes = int(time_range[:-1])
+                    from_time = now - (minutes * 60)
+                except ValueError:
+                    from_time = now - 3600  # Default 1 hour
+            elif time_range.endswith('d'):
+                try:
+                    days = int(time_range[:-1])
+                    from_time = now - (days * 86400)
+                except ValueError:
+                    from_time = now - 3600  # Default 1 hour
+            else:
+                from_time = now - 3600  # Default 1 hour
+        else:
+            from_time = now - 3600  # Default 1 hour
+        
+        # Datadog metrics API endpoint
+        url = "https://api.datadoghq.com/api/v1/query"
+        
+        payload = {
+            "query": datadog_metric,
+            "from": from_time,
+            "to": now
+        }
+        
+        logger.info(f"Getting Datadog metrics for service: {service_name}, type: {metric_type}")
+        response = self.session.get(url, params=payload)
+        
+        if response.status_code != 200:
+            raise Exception(f"Failed to get Datadog metrics: {response.text}")
+        
+        return response.json().get("series", [])
     
     def _dynatrace_get_metrics(self, service_name, metric_type, time_range=None):
         """Get metrics from Dynatrace"""
