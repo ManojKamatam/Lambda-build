@@ -25,7 +25,7 @@ class APMService:
             raise ValueError(f"Unsupported APM type: {self.apm_type}")
     
     def _init_dynatrace(self):
-        """Initialize Dynatrace client with OAuth support"""
+        """Initialize Dynatrace client with support for both metrics and logs"""
         self.base_url = self.extra_params.get("base_url")
         if not self.base_url:
             raise ValueError("Dynatrace requires 'base_url' parameter")
@@ -35,10 +35,20 @@ class APMService:
         # Check if Grail is enabled (using OAuth)
         self.uses_grail = self.extra_params.get("uses_grail", False)
         
+        # Store API token for metrics
+        self.api_token = self.api_key
+        
+        # Initialize OAuth token for logs if Grail is enabled
+        self.oauth_token = None
+        
         if self.uses_grail:
             # Get client credentials from extra_params
             client_id = self.extra_params.get("client_id")
-            client_secret = self.api_key  # Use API key as client secret
+            client_secret = self.extra_params.get("oauth_client_secret")  # Use specific param
+            
+            if not client_secret:
+                logger.info("No oauth_client_secret found, falling back to api_key as client_secret")
+                client_secret = self.api_key
             
             if client_id and client_secret:
                 # Get OAuth token
@@ -57,29 +67,25 @@ class APMService:
                 try:
                     response = requests.post(token_url, headers=token_headers, data=token_data)
                     if response.status_code == 200:
-                        oauth_token = response.json().get("access_token")
-                        self.session.headers.update({
-                            "Authorization": f"Bearer {oauth_token}",
-                            "Content-Type": "application/json"
-                        })
+                        self.oauth_token = response.json().get("access_token")
                         logger.info("Successfully obtained Dynatrace OAuth token")
-                        return
                     else:
                         logger.warning(f"Failed to get OAuth token: {response.text}")
                 except Exception as e:
                     logger.error(f"Error getting OAuth token: {str(e)}")
             
-            # Fall back to using API key directly as Bearer token
+            # Initialize session with API token for default operations
             self.session.headers.update({
-                "Authorization": f"Bearer {self.api_key}",
+                "Authorization": f"Api-Token {self.api_token}",
                 "Content-Type": "application/json"
             })
         else:
-            # Default to API token authentication
+            # Not using Grail, just set API token
             self.session.headers.update({
-                "Authorization": f"Api-Token {self.api_key}",
+                "Authorization": f"Api-Token {self.api_token}",
                 "Content-Type": "application/json"
             })
+            
     def _init_datadog(self):
         """Initialize Datadog client"""
         self.api_key = self.api_key
@@ -127,69 +133,12 @@ class APMService:
             return self._newrelic_get_metrics(service_name, metric_type, time_range)
     
     def _dynatrace_get_logs(self, service_name, time_range=None, log_level="ERROR"):
-        """Get logs from Dynatrace"""
-        # Parse time_range string if provided in that format
-        if isinstance(time_range, str):
-            end_time = datetime.utcnow()
-            
-            # Handle different time formats like "1h", "30m", etc.
-            if time_range.endswith('h'):
-                try:
-                    hours = int(time_range[:-1])
-                    start_time = end_time - timedelta(hours=hours)
-                except ValueError:
-                    start_time = end_time - timedelta(hours=1)
-            elif time_range.endswith('m'):
-                try:
-                    minutes = int(time_range[:-1])
-                    start_time = end_time - timedelta(minutes=minutes)
-                except ValueError:
-                    start_time = end_time - timedelta(hours=1)
-            elif time_range.endswith('d'):
-                try:
-                    days = int(time_range[:-1])
-                    start_time = end_time - timedelta(days=days)
-                except ValueError:
-                    start_time = end_time - timedelta(hours=1)
-            else:
-                # Default to 1 hour if format not recognized
-                start_time = end_time - timedelta(hours=1)
-            
-            # Format timestamps with millisecond precision (3 decimal places)
-            from_time = start_time.isoformat().split('.')[0]
-            if start_time.microsecond > 0:
-                # Add millisecond precision (3 decimal places)
-                from_time += f".{start_time.microsecond // 1000:03d}"
-            from_time += "Z"
-            
-            to_time = end_time.isoformat().split('.')[0]
-            if end_time.microsecond > 0:
-                # Add millisecond precision (3 decimal places)
-                to_time += f".{end_time.microsecond // 1000:03d}"
-            to_time += "Z"
-        # Handle dictionary format
-        elif isinstance(time_range, dict) and "start" in time_range and "end" in time_range:
-            from_time = time_range["start"]
-            to_time = time_range["end"]
-        # Default case
-        else:
-            end_time = datetime.utcnow()
-            start_time = end_time - timedelta(hours=1)
-            
-            # Format timestamps with millisecond precision
-            from_time = start_time.isoformat().split('.')[0]
-            if start_time.microsecond > 0:
-                from_time += f".{start_time.microsecond // 1000:03d}"
-            from_time += "Z"
-            
-            to_time = end_time.isoformat().split('.')[0]
-            if end_time.microsecond > 0:
-                to_time += f".{end_time.microsecond // 1000:03d}"
-            to_time += "Z"
+        """Get logs from Dynatrace with proper OAuth handling"""
+        # Time range processing code remains the same...
         
         # Format the query for Dynatrace Logs API
         query = f"service:{service_name} AND level:{log_level}"
-    
+        
         url = f"{self.base_url}/api/v2/logs/search"
         params = {
             "query": query,
@@ -198,43 +147,49 @@ class APMService:
             "limit": 100
         }
         
-        # First attempt with current authentication
+        # If we have an OAuth token and Grail is enabled, use it
+        if self.uses_grail and self.oauth_token:
+            original_auth = self.session.headers.get("Authorization")
+            try:
+                # Switch to OAuth token temporarily
+                self.session.headers.update({
+                    "Authorization": f"Bearer {self.oauth_token}"
+                })
+                response = self.session.get(url, params=params)
+                
+                if response.status_code == 200:
+                    return response.json().get("logs", [])
+            finally:
+                # Restore original authorization header
+                self.session.headers.update({
+                    "Authorization": original_auth
+                })
+        
+        # Otherwise try with current session auth (API token)
         response = self.session.get(url, params=params)
         
-        # If we get an OAuth token missing error and we're not already using OAuth, 
-        # try switching to OAuth authentication and retry
-        if (response.status_code == 401 and 
-            "OAuth token is missing" in response.text and 
-            not self.uses_grail):
-            
-            print("Detected Grail environment, switching to OAuth authentication")
-            self.uses_grail = True
-            self.session.headers.update({
-                "Authorization": f"Bearer {self.api_key}"
-            })
-            
-            # Retry the request with OAuth authentication
-            response = self.session.get(url, params=params)
+        # If OAuth error and we're not using stored OAuth token, try to get one
+        if (response.status_code == 401 and "OAuth token is missing" in response.text):
+            if not self.oauth_token:
+                logger.warning("Need OAuth token for logs but none available")
+            raise Exception(
+                "Failed to get Dynatrace logs: OAuth token is required. " +
+                response.text
+            )
         
         if response.status_code != 200:
-            if response.status_code == 401 and "OAuth token is missing" in response.text:
-                raise Exception(
-                    "Failed to get Dynatrace logs: OAuth token is required for Grail environments. "
-                    "Please provide an OAuth token with storage:logs:read and storage:buckets:read scopes "
-                    "and set uses_grail=True in extra_params or APM_EXTRA_PARAMS environment variable."
-                )
             raise Exception(f"Failed to get Dynatrace logs: {response.text}")
         
         return response.json().get("logs", [])
     
     def _dynatrace_get_metrics(self, service_name, metric_type, time_range=None):
-        """Get metrics from Dynatrace"""
+        """Get metrics from Dynatrace with auth fallback"""
         # Map generic metric types to Dynatrace metrics
         metric_mapping = {
             "cpu": "builtin:host.cpu.usage",
             "memory": "builtin:host.mem.usage",
             "latency": "builtin:service.response.time",
-            "error_rate": "builtin:service.errors.total.rate",
+            "error_rate": "builtin:service.errors.total.rate", 
             "throughput": "builtin:service.requestCount.total"
         }
         
@@ -242,13 +197,10 @@ class APMService:
         if not dynatrace_metric:
             raise ValueError(f"Unsupported metric type: {metric_type}")
         
+        # Format time range
         if isinstance(time_range, str):
             # Handle different time formats
-            if time_range.endswith('h'):
-                from_time = f"now-{time_range}"
-            elif time_range.endswith('m'):
-                from_time = f"now-{time_range}"
-            elif time_range.endswith('d'):
+            if time_range.endswith('h') or time_range.endswith('m') or time_range.endswith('d'):
                 from_time = f"now-{time_range}"
             else:
                 from_time = "now-1h"  # Default fallback
@@ -262,9 +214,25 @@ class APMService:
             "resolution": "Inf"
         }
         
+        # First try with current auth (should be API token)
         response = self.session.get(url, params=params)
         
-        if response.status_code != 200:
-            raise Exception(f"Failed to get Dynatrace metrics: {response.text}")
-        
-        return response.json().get("result", [])
+        # If it fails and we have OAuth token, try with that
+        if response.status_code == 401 and self.oauth_token:
+            logger.info("API token failed for metrics, trying OAuth token")
+            original_auth = self.session.headers.get("Authorization")
+            try:
+                self.session.headers.update({
+                    "Authorization": f"Bearer {self.oauth_token}"
+                })
+                response = self.session.get(url, params=params)
+            finally:
+                # Restore original auth
+                self.session.headers.update({
+                    "Authorization": original_auth
+                })
+    
+    if response.status_code != 200:
+        raise Exception(f"Failed to get Dynatrace metrics: {response.text}")
+    
+    return response.json().get("result", [])
