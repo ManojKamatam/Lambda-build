@@ -4,6 +4,10 @@ import os
 import base64
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
+import logging
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
 
 class APMService:
     def __init__(self, apm_type=None, api_key=None, **kwargs):
