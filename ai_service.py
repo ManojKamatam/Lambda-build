@@ -22,6 +22,10 @@ class AIService:
         
         for text in texts:
             try:
+                # Limit text length for token limits
+                if len(text) > 8000:
+                    text = text[:8000]
+                    
                 response = self.bedrock.invoke_model(
                     modelId=self.model_id,
                     body=json.dumps({
@@ -29,8 +33,19 @@ class AIService:
                     })
                 )
                 
-                response_body = json.loads(response['body'].read().decode())
-                embedding = response_body['embedding']
+                # Handle response based on type
+                if hasattr(response['body'], 'read'):
+                    body = json.loads(response['body'].read().decode())
+                else:
+                    body = json.loads(response['body']) if isinstance(response['body'], str) else response['body']
+                    
+                # Validate we got an embedding
+                if 'embedding' not in body:
+                    logger.error("No embedding in Bedrock response")
+                    embeddings.append([0.0] * 1536)  # Default embedding size
+                    continue
+                    
+                embedding = body['embedding']
                 embeddings.append(embedding)
             except Exception as e:
                 logger.error(f"Error getting embedding: {str(e)}")
