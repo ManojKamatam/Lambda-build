@@ -240,23 +240,44 @@ def lambda_handler(event, context):
             
             logger.info(f"Created problem text for embeddings ({len(problem_text)} chars)")
             
-            # Get vectors for problem and files
-            problem_embedding = ai_service.get_embeddings([problem_text])[0]
-            
-            # Calculate embeddings for files
-            file_embeddings = []
-            file_paths = []
-            
-            for file_path, content in file_contents.items():
-                # Use a representative sample of the file
-                sample = content[:1000]
-                if len(content) > 2000:
-                    # Add end of file if long enough
-                    sample += "\n...\n" + content[-500:]
+            # Get embeddings through OpenSearch service if available
+            if opensearch_service and opensearch_service.client:
+                logger.info("Using OpenSearch for Bedrock embeddings")
+                problem_embedding = opensearch_service.get_bedrock_embeddings([problem_text])[0]
                 
-                file_embedding = ai_service.get_embeddings([sample])[0]
-                file_embeddings.append(file_embedding)
-                file_paths.append(file_path)
+                # Calculate embeddings for files
+                file_embeddings = []
+                file_paths = []
+                
+                for file_path, content in file_contents.items():
+                    # Use a representative sample of the file
+                    sample = content[:1000]
+                    if len(content) > 2000:
+                        # Add end of file if long enough
+                        sample += "\n...\n" + content[-500:]
+                    
+                    file_embedding = opensearch_service.get_bedrock_embeddings([sample])[0]
+                    file_embeddings.append(file_embedding)
+                    file_paths.append(file_path)
+            else:
+                logger.info("Using AI service for embeddings")
+                # Get vectors from AI service instead
+                problem_embedding = ai_service.get_embeddings([problem_text])[0]
+                
+                # Calculate embeddings for files
+                file_embeddings = []
+                file_paths = []
+                
+                for file_path, content in file_contents.items():
+                    # Use a representative sample of the file
+                    sample = content[:1000]
+                    if len(content) > 2000:
+                        # Add end of file if long enough
+                        sample += "\n...\n" + content[-500:]
+                    
+                    file_embedding = ai_service.get_embeddings([sample])[0]
+                    file_embeddings.append(file_embedding)
+                    file_paths.append(file_path)
             
             # Calculate similarities
             similarities = []
@@ -267,7 +288,7 @@ def lambda_handler(event, context):
                 )
                 similarities.append(float(similarity))
             
-            # Get top relevant files with a lower threshold (0.1 instead of default)
+            # Get top relevant files with a lower threshold
             if similarities:
                 # Include any files with similarity above threshold
                 threshold = 0.1
@@ -303,7 +324,7 @@ def lambda_handler(event, context):
                         logger.warning(f"Failed to get file {file_path}: {str(e)}")
             
             # Store vectors in OpenSearch if available
-            if opensearch_service:
+            if opensearch_service and opensearch_service.client:
                 try:
                     # Store problem vector
                     opensearch_service.index_vector(
@@ -318,15 +339,15 @@ def lambda_handler(event, context):
                         }
                     )
                     
-                    # Store file vectors
-                    opensearch_service.store_file_vectors(
+                    # Store file vectors using bulk API
+                    success_count = opensearch_service.store_file_vectors(
                         context.aws_request_id,
                         file_paths,
                         file_embeddings,
                         file_contents,
                         repo
                     )
-                    logger.info("Stored vectors in OpenSearch")
+                    logger.info(f"Stored {success_count} vectors in OpenSearch")
                 except Exception as e:
                     logger.warning(f"Failed to store vectors in OpenSearch: {str(e)}")
 
@@ -402,6 +423,10 @@ def lambda_handler(event, context):
                     if isinstance(analysis, dict) and 'tool_results' in analysis:
                         # Extract error patterns from logs for additional file discovery
                         error_patterns = []
+                        
+                        # Collect service names mentioned in logs
+                        service_names_in_logs = set()
+                        
                         for result in analysis.get('tool_results', []):
                             if result.get('tool_name') == 'get_additional_logs':
                                 logs = result.get('result', [])
@@ -409,20 +434,108 @@ def lambda_handler(event, context):
                                     if isinstance(log, dict) and 'content' in log:
                                         # Extract patterns from log content
                                         log_content = log['content']
-                                        # Look for file paths and function names
+                                        
+                                        # Look for file paths with various patterns
                                         file_patterns = re.findall(r'File "([^"]+)"', log_content)
+                                        file_patterns.extend(re.findall(r'at ([a-zA-Z0-9_./$]+)\(', log_content))  # Java stack traces
+                                        file_patterns.extend(re.findall(r'at ([a-zA-Z0-9_./$]+):[0-9]+', log_content))  # Node.js stack traces
+                                        
+                                        # Look for function names
                                         func_patterns = re.findall(r'in ([a-zA-Z0-9_]+)\(', log_content)
-                                        error_patterns.extend(file_patterns + func_patterns)
+                                        func_patterns.extend(re.findall(r'method=([a-zA-Z0-9_]+)', log_content))
+                                        
+                                        # Look for class names
+                                        class_patterns = re.findall(r'class=([a-zA-Z0-9_]+)', log_content)
+                                        class_patterns.extend(re.findall(r'([A-Z][a-zA-Z0-9_]+Exception)', log_content))
+                                        
+                                        # Extract service names
+                                        service_pattern = re.findall(r'service=([a-zA-Z0-9_-]+)', log_content)
+                                        service_pattern.extend(re.findall(r'([a-zA-Z0-9_-]+Service)', log_content))
+                                        service_names_in_logs.update(service_pattern)
+                                        
+                                        # Extract endpoint patterns
+                                        endpoint_patterns = re.findall(r'(GET|POST|PUT|DELETE) /[a-zA-Z0-9_/]+', log_content)
+                                        endpoint_patterns = [p.split(' ')[1].strip('/') for p in endpoint_patterns]
+                                        
+                                        # Collect all patterns
+                                        error_patterns.extend(file_patterns + func_patterns + class_patterns + endpoint_patterns)
+                        
+                        # Add service names from logs to our problem info
+                        if service_names_in_logs:
+                            problem_info['service_names'] = list(set(problem_info.get('service_names', []) + list(service_names_in_logs)))
                         
                         if error_patterns:
                             logger.info(f"Found error patterns in logs: {error_patterns}")
                             # Add these as components for a second file search
                             if 'components' not in problem_info:
                                 problem_info['components'] = []
-                            problem_info['components'] = list(set(problem_info['components'] + error_patterns))
+                            
+                            # Filter out very short patterns (likely false positives)
+                            filtered_error_patterns = [p for p in error_patterns if len(p) > 3]
+                            
+                            problem_info['components'] = list(set(problem_info['components'] + filtered_error_patterns))
                             
                             # Do a second component-based file search
                             additional_files = get_component_based_files(vcs_service, repo, problem_info, file_list)
+                            
+                            # If component search doesn't find enough, try semantic search with updated problem info
+                            if len(additional_files) < 3 and opensearch_service and opensearch_service.client:
+                                logger.info("Component search after log analysis found few files, trying semantic search with updated context")
+                                
+                                # Create updated problem text for embedding with log information
+                                components_text = ", ".join(problem_info.get('components', []))
+                                service_names_text = ", ".join(problem_info.get('service_names', []))
+                                
+                                # Extract log content to include in search
+                                log_excerpts = []
+                                for result in analysis.get('tool_results', []):
+                                    if result.get('tool_name') == 'get_additional_logs':
+                                        logs = result.get('result', [])
+                                        for log in logs[:5]:  # Limit to first 5 logs
+                                            if isinstance(log, dict) and 'content' in log:
+                                                log_excerpts.append(log['content'][:200])  # Truncate long logs
+                                
+                                log_text = "\n".join(log_excerpts)
+                                
+                                # Enhanced problem text with log excerpts
+                                updated_problem_text = f"""
+                                {problem_info.get('title', '')}
+                                {problem_info.get('plain_description', problem_info.get('description', ''))}
+                                Services: {service_names_text}
+                                Components: {components_text}
+                                
+                                Error logs:
+                                {log_text}
+                                """
+                                
+                                # Get updated problem embedding
+                                updated_problem_embedding = opensearch_service.get_bedrock_embeddings([updated_problem_text])[0]
+                                
+                                # Re-run similarity calculation with the new context
+                                updated_similarities = []
+                                for file_embedding in file_embeddings:
+                                    similarity = np.dot(updated_problem_embedding, file_embedding) / (
+                                        np.linalg.norm(updated_problem_embedding) * np.linalg.norm(file_embedding)
+                                    )
+                                    updated_similarities.append(float(similarity))
+                                
+                                # Get top relevant files with the same threshold
+                                if updated_similarities:
+                                    threshold = 0.1
+                                    relevant_indices = [i for i, sim in enumerate(updated_similarities) if sim > threshold]
+                                    
+                                    if relevant_indices:
+                                        top_indices = sorted(relevant_indices, key=lambda i: updated_similarities[i], reverse=True)[:10]
+                                        updated_file_paths = [file_paths[i] for i in top_indices]
+                                        
+                                        # Get content for any new files
+                                        for file_path in updated_file_paths:
+                                            if file_path not in relevant_files and file_path not in additional_files:
+                                                try:
+                                                    content = vcs_service.get_file_content(repo, file_path)
+                                                    additional_files[file_path] = content
+                                                except Exception as e:
+                                                    logger.warning(f"Failed to get file {file_path}: {str(e)}")
                             
                             # Add any new files to relevant_files
                             new_files_count = 0
