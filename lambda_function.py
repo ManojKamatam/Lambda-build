@@ -594,6 +594,73 @@ def lambda_handler(event, context):
         duration = (end_time - start_time).total_seconds()
         logger.info(f"Lambda execution completed in {duration:.2f} seconds")
 
+def detect_technology(description, service_name):
+    """Detect application technology stack from alert description and service name"""
+    components = []
+    tech_detected = False
+    
+    # Java detection
+    if any(pattern in description.lower() for pattern in 
+           ['java.lang.', 'springframework', 'java.io.', 
+            'tomcat', 'java', 'jakarta', 'hibernate']):
+        components.extend(['Java', 'src/main', 'pom.xml', 'build.gradle'])
+        tech_detected = True
+    
+    # .NET detection
+    if any(pattern in description.lower() for pattern in 
+            ['system.', 'microsoft.', '.net', 'aspnet', 'c#', 'iis']):
+        components.extend(['C#', 'Controllers', 'Models', 'web.config'])
+        tech_detected = True
+    
+    # Python detection
+    if any(pattern in description.lower() for pattern in 
+            ['python', 'flask', 'django', 'werkzeug', 'gunicorn', 'uwsgi']):
+        components.extend(['Python', 'app.py', 'routes', 'views.py'])
+        tech_detected = True
+    
+    # JavaScript/Node detection
+    if any(pattern in description.lower() for pattern in 
+            ['node', 'express', 'javascript', 'npm', 'yarn', 'js']):
+        components.extend(['JavaScript', 'index.js', 'routes', 'package.json'])
+        tech_detected = True
+    
+    # Go detection
+    if any(pattern in description.lower() for pattern in 
+            ['go', 'golang', 'goroutine', 'panic:']):
+        components.extend(['Go', 'main.go', 'handlers', 'go.mod'])
+        tech_detected = True
+    
+    # Service name based detection as fallback
+    if not tech_detected:
+        service_lower = service_name.lower()
+        
+        # Try to infer technology from service name
+        if any(term in service_lower for term in ['java', 'spring', 'tomcat']):
+            components.extend(['Java', 'src/main'])
+        elif any(term in service_lower for term in ['node', 'js', 'javascript']):
+            components.extend(['JavaScript', 'index.js'])
+        elif any(term in service_lower for term in ['py', 'flask', 'django']):
+            components.extend(['Python', 'app.py'])
+        elif any(term in service_lower for term in ['net', 'asp', 'iis']):
+            components.extend(['C#', 'Controllers'])
+        elif any(term in service_lower for term in ['go']):
+            components.extend(['Go', 'main.go'])
+        # Generic API components if no specific technology detected
+        elif 'api' in service_lower:
+            components.extend(['API', 'routes', 'config', 'controllers'])
+    
+    # Add general component patterns that apply across multiple technologies
+    if 'database' in description.lower() or 'sql' in description.lower():
+        components.extend(['database', 'db', 'repository', 'dao', 'model'])
+    
+    if 'memory' in description.lower():
+        components.extend(['config', 'settings'])
+        
+    if 'error' in description.lower() or 'exception' in description.lower():
+        components.extend(['error', 'exception', 'handler', 'middleware'])
+    
+    return components
+
 def get_component_based_files(vcs_service, repo, problem_info, file_list):
     """Find files based on components extracted from problem info"""
     components = problem_info.get('components', [])
@@ -601,13 +668,31 @@ def get_component_based_files(vcs_service, repo, problem_info, file_list):
     # Add all components and service names together
     search_terms = components + service_names
     
-    # Also check for common error types in the description
+    # Get description to detect technologies
     description = problem_info.get('plain_description', problem_info.get('description', ''))
-    if any(term in description.lower() for term in ['exception', 'error', 'sql', 'query', 'database']):
-        search_terms.extend(['exception', 'error', 'sql', 'db', 'database', 'query'])
     
-    if any(term in description.lower() for term in ['flask', 'api', 'endpoint']):
-        search_terms.extend(['flask', 'app.py', 'api', 'routes', 'views'])
+    # Detect key technology indicators in description
+    is_java = any(term in description.lower() for term in ['java', 'spring', 'jvm', 'heap'])
+    is_dotnet = any(term in description.lower() for term in ['.net', 'c#', 'iis', 'aspnet'])
+    is_python = any(term in description.lower() for term in ['python', 'flask', 'django', 'werkzeug'])
+    is_nodejs = any(term in description.lower() for term in ['node', 'javascript', 'npm', 'express'])
+    is_go = any(term in description.lower() for term in ['go', 'golang'])
+    
+    # Add technology-specific search terms
+    if is_java:
+        search_terms.extend(['java', 'src', 'main', 'controller', 'service', 'repository', 'pom.xml', 'build.gradle'])
+    elif is_dotnet:
+        search_terms.extend(['controller', 'model', 'service', 'repository', 'startup', 'program', 'web.config'])
+    elif is_python:
+        search_terms.extend(['exception', 'error', 'sql', 'db', 'database', 'query', 'flask', 'app.py', 'api', 'routes', 'views'])
+    elif is_nodejs:
+        search_terms.extend(['index.js', 'app.js', 'server.js', 'routes', 'controllers', 'middleware'])
+    elif is_go:
+        search_terms.extend(['main.go', 'handler', 'router', 'middleware'])
+    
+    # Common patterns across technologies
+    if any(term in description.lower() for term in ['exception', 'error', 'sql', 'query', 'database']):
+        search_terms.extend(['exception', 'error', 'sql', 'db', 'database', 'query', 'repository', 'dao'])
     
     # Log what we're looking for
     logger.info(f"Searching for files related to: {search_terms}")
@@ -619,12 +704,20 @@ def get_component_based_files(vcs_service, repo, problem_info, file_list):
         score = 0
         file_lower = file_path.lower()
         
-        # Score by file extension
-        if file_path.endswith('.py'):  # Python files get higher score for Flask issues
+        # Score by file extension (technology specific)
+        if is_java and any(file_path.endswith(ext) for ext in ['.java', '.xml', '.properties', '.yml']):
             score += 3
-        elif any(file_path.endswith(ext) for ext in ['.js', '.java', '.go', '.ts']):
+        elif is_dotnet and any(file_path.endswith(ext) for ext in ['.cs', '.cshtml', '.config', '.json']):
+            score += 3
+        elif is_python and file_path.endswith('.py'):
+            score += 3
+        elif is_nodejs and any(file_path.endswith(ext) for ext in ['.js', '.ts', '.json']):
+            score += 3
+        elif is_go and file_path.endswith('.go'):
+            score += 3
+        elif any(file_path.endswith(ext) for ext in ['.js', '.java', '.go', '.ts', '.py', '.cs']):  # Common code files
             score += 2
-        elif any(file_path.endswith(ext) for ext in ['.yml', '.yaml', '.json', '.xml', '.conf']):
+        elif any(file_path.endswith(ext) for ext in ['.yml', '.yaml', '.json', '.xml', '.conf']):  # Config files
             score += 1
         
         # Score by component matches in path
@@ -632,8 +725,16 @@ def get_component_based_files(vcs_service, repo, problem_info, file_list):
             if term and len(term) > 2 and term.lower() in file_lower:
                 score += 4
         
-        # Important file patterns get extra points
-        if any(pattern in file_lower for pattern in ['app.py', 'main.py', 'config.py', 'settings.py', 'database.py']):
+        # Important file patterns by technology
+        if is_java and any(pattern in file_lower for pattern in ['application.properties', 'application.yml', 'pom.xml', 'build.gradle']):
+            score += 5
+        elif is_dotnet and any(pattern in file_lower for pattern in ['startup.cs', 'program.cs', 'web.config', 'appsettings.json']):
+            score += 5
+        elif is_python and any(pattern in file_lower for pattern in ['app.py', 'main.py', 'config.py', 'settings.py', 'database.py']):
+            score += 5
+        elif is_nodejs and any(pattern in file_lower for pattern in ['index.js', 'app.js', 'server.js', 'package.json']):
+            score += 5
+        elif is_go and any(pattern in file_lower for pattern in ['main.go', 'go.mod']):
             score += 5
         
         # Only get content for promising files
@@ -663,6 +764,14 @@ def get_component_based_files(vcs_service, repo, problem_info, file_list):
 def extract_problem_info(event):
     """Extract structured problem info from the event"""
     try:
+        # Add diagnostic logging
+        logger.info(f"Event type: {type(event).__name__}")
+        if isinstance(event, dict):
+            logger.info(f"Event keys: {list(event.keys())}")
+            if 'body' in event:
+                body_type = type(event['body']).__name__
+                logger.info(f"Body type: {body_type}")
+        
         # Check for nested body structure (common in test events)
         if isinstance(event, dict) and 'body' in event and isinstance(event['body'], dict) and 'alert_type' in event['body']:
             # Use the nested body directly
@@ -676,7 +785,7 @@ def extract_problem_info(event):
                     service_name = tag.split(':', 1)[1]
                     break
             
-            # Rest of the Datadog webhook processing...
+            # Map severity based on alert type
             severity_mapping = {
                 'error': 'CRITICAL',
                 'warning': 'MAJOR',
@@ -693,16 +802,19 @@ def extract_problem_info(event):
             formatted_desc += f"<li>Condition: {body.get('alertCondition', body.get('alert_condition', 'Unknown'))}</li>"
             formatted_desc += f"<li>Metric: {body.get('alertMetric', body.get('metric', 'Unknown'))}</li>"
             
-            # Extract components from the message
-            components = []
+            # Extract components using generic technology detection
+            components = detect_technology(description, service_name)
+            
+            # Also extract components from the message text using regex
             message_text = body.get('message', '')
-            components = re.findall(r'([A-Za-z][A-Za-z0-9]*(?:Service|API|App|Module))', message_text)
+            service_components = re.findall(r'([A-Za-z][A-Za-z0-9]*(?:Service|API|App|Module))', message_text)
+            components.extend(service_components)
             
             # Plain description for better embedding
             plain_description = re.sub(r'<[^>]+>', ' ', formatted_desc)
             plain_description = re.sub(r'\s+', ' ', plain_description).strip()
             
-            return {
+            problem_info = {
                 'title': body.get('title', f"Alert for {service_name}"),
                 'severity': severity,
                 'impact': service_name,
@@ -713,6 +825,63 @@ def extract_problem_info(event):
                 'components': list(set(components))  # Deduplicate components
             }
             
+            logger.info(f"Extracted service names: {problem_info['service_names']}")
+            logger.info(f"Extracted components: {problem_info['components']}")
+            
+            return problem_info
+        
+        # Check if this is an API Gateway event with a body (webhook)
+        elif isinstance(event, dict) and 'body' in event and isinstance(event['body'], str):
+            # Parse the body if it's a string
+            try:
+                logger.info("Attempting to parse string body as JSON")
+                body = json.loads(event['body'])
+                
+                # Check if this looks like a Datadog webhook
+                if 'alert_type' in body and ('title' in body or 'hostname' in body):
+                    logger.info("Detected Datadog webhook in API Gateway format")
+                    
+                    # Extract service name from tags if available
+                    service_name = body.get('hostname', 'unknown-service')
+                    for tag in body.get('tags', []):
+                        if tag.startswith('service:'):
+                            service_name = tag.split(':', 1)[1]
+                            break
+                    
+                    # Process the alert similarly to the nested body format
+                    severity_mapping = {
+                        'error': 'CRITICAL',
+                        'warning': 'MAJOR',
+                        'info': 'MINOR',
+                        'success': 'NORMAL'
+                    }
+                    severity = severity_mapping.get(body.get('alert_type', ''), 'MAJOR')
+                    
+                    description = body.get('message', body.get('body', 'No details available'))
+                    components = detect_technology(description, service_name)
+                    
+                    formatted_desc = description + f"\n\n<li>Status: {body.get('status', 'Unknown')}</li>"
+                    formatted_desc += f"<li>Condition: {body.get('alertCondition', body.get('alert_condition', 'Unknown'))}</li>"
+                    formatted_desc += f"<li>Metric: {body.get('alertMetric', body.get('metric', 'Unknown'))}</li>"
+                    
+                    plain_description = re.sub(r'<[^>]+>', ' ', formatted_desc)
+                    plain_description = re.sub(r'\s+', ' ', plain_description).strip()
+                    
+                    return {
+                        'title': body.get('title', f"Alert for {service_name}"),
+                        'severity': severity,
+                        'impact': service_name,
+                        'description': formatted_desc,
+                        'plain_description': plain_description,
+                        'service_names': [service_name],
+                        'entity_ids': [str(body.get('id', 'ENTITY-UNKNOWN'))],
+                        'components': list(set(components))  # Deduplicate components
+                    }
+            except Exception as e:
+                logger.error(f"Error parsing webhook body: {str(e)}")
+                # Continue with other extractors
+        
+        # For Dynatrace alerts (with technology detection added)
         if 'problemTitle' in event:
             # Extract service names from impacted entities
             service_names = []
@@ -728,28 +897,22 @@ def extract_problem_info(event):
             description = event.get('problemDetails', 'No details available')
             
             # Extract patterns from HTML description
-            import re
-            
-            # Extract code patterns (paths, functions) from <code> tags
             code_patterns = re.findall(r'<code>([^<]+)</code>', description)
             components.extend(code_patterns)
             
-            # Extract error patterns from list items
             error_patterns = re.findall(r'<li>([^<]+)</li>', description)
             components.extend(error_patterns)
             
-            # Extract plain text from HTML for better embedding
             plain_description = re.sub(r'<[^>]+>', ' ', description)
             plain_description = re.sub(r'\s+', ' ', plain_description).strip()
             
-            # Extract potential keywords from title
             title_components = re.findall(r'([A-Za-z][A-Za-z0-9]*(?:Service|API|App|Module))', event.get('problemTitle', ''))
             components.extend(title_components)
             
-            if "Flask" in description or "Flask" in event.get('problemTitle', ''):
-                components.append("Flask")
-                components.append("app.py")
-                components.append("routes")
+            # Use technology detection instead of hardcoded Flask components
+            service_name = service_names[0] if service_names else "unknown-service"
+            tech_components = detect_technology(description + " " + event.get('problemTitle', ''), service_name)
+            components.extend(tech_components)
             
             return {
                 'title': event.get('problemTitle', 'Unknown Issue'),
@@ -762,25 +925,43 @@ def extract_problem_info(event):
                 'components': list(set(components))  # Deduplicate components
             }
         
-        # For custom events and fallbacks
+        # For custom events and fallbacks - with technology detection
         elif 'problem' in event:
-            return event['problem']
+            problem = event['problem']
+            if 'components' not in problem and 'description' in problem:
+                service_name = problem.get('impact', 'unknown-service')
+                tech_components = detect_technology(problem['description'], service_name)
+                problem['components'] = list(set(problem.get('components', []) + tech_components))
+            return problem
         else:
+            # Default case - ensure we always have service_names and components
+            logger.warning("No specific alert format detected, using fallback format")
+            title = event.get('title', 'Unknown Issue')
+            description = event.get('description', 'No details available')
+            service_name = event.get('service', 'unknown-service')
+            
+            # Detect technology even in fallback case
+            components = detect_technology(description, service_name)
+            
             return {
-                'title': event.get('title', 'Unknown Issue'),
+                'title': title,
                 'severity': event.get('severity', 'UNKNOWN'),
-                'impact': event.get('impact', 'Unknown Entity'),
-                'description': event.get('description', 'No details available')
+                'impact': event.get('impact', service_name),
+                'description': description,
+                'plain_description': description,
+                'service_names': [service_name],
+                'components': components
             }
     except Exception as e:
-        logger.error(f"Error extracting problem info: {e}")
+        logger.error(f"Error extracting problem info: {e}", exc_info=True)
         return {
             'title': "Unknown Issue",
             'severity': "UNKNOWN", 
             'impact': "Unknown Entity",
-            'description': "No details available"
+            'description': "No details available",
+            'service_names': ['unknown-service'],
+            'components': []
         }
-
 # Updated environment variables for generic repository configuration
 REPO_OWNER = os.environ.get("REPO_OWNER") 
 REPO_NAME = os.environ.get("REPO_NAME")
@@ -809,19 +990,45 @@ def extract_repo_info(event):
         return {}
 
 def filter_files_by_extensions(file_list):
-    """Filter files based on extensions of interest and problem context"""
-    # Original list of extensions - keep this for backward compatibility
+    """Filter files based on extensions across multiple technologies"""
+    # Comprehensive extensions for multiple languages
     extensions_of_interest = [
-        '.py', '.js', '.java', '.go', '.ts', '.yaml', '.yml', 
-        '.json', '.xml', '.sh', '.cs', '.cpp', '.h', '.jsx', 
-        '.tsx', '.rb', '.php', '.tf', '.conf', '.properties'
+        # Common programming languages
+        '.py', '.js', '.ts', '.java', '.cs', '.go', 
+        '.rb', '.php', '.scala', '.kt', '.groovy',
+        '.cpp', '.c', '.h', '.hpp', '.swift', '.m',
+        
+        # Web technologies
+        '.jsx', '.tsx', '.vue', '.html', '.css', '.scss',
+        
+        # Configuration and data
+        '.yaml', '.yml', '.json', '.xml', '.ini', '.toml', '.conf',
+        '.properties', '.env', '.config', '.tf',
+        
+        # Scripts
+        '.sh', '.bat', '.ps1', '.sql'
     ]
     
-    # Add language-agnostic files that are typically important
+    # Important files by name pattern
     important_files = [
-        'Dockerfile', 'docker-compose', 'Makefile', 'README', 
-        'app.py', 'main.py', 'index.', 'server.', 'config.', 'settings.',
-        'requirements.txt', 'package.json', 'build.gradle'
+        # Container and deployment
+        'dockerfile', 'docker-compose', 'kubernetes', 'k8s',
+        
+        # Build and dependency management
+        'makefile', 'pom.xml', 'build.gradle', 'package.json',
+        'requirements.txt', 'go.mod', 'gemfile',
+        
+        # Configuration
+        'config', 'settings', '.env', 'web.config', 'appsettings',
+        
+        # Common entry points
+        'app.', 'main.', 'index.', 'server.', 'program.', 'startup.',
+        
+        # Database related
+        'database', 'repository', 'dao', 'model', 'entity',
+        
+        # API and controllers
+        'controller', 'route', 'handler', 'middleware', 'api'
     ]
     
     filtered_files = []
