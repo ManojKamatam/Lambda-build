@@ -353,18 +353,37 @@ class APMService:
         return logs_data.get("data", [])
     
     def _datadog_get_metrics(self, service_name, metric_type, time_range=None):
-        """Get metrics from Datadog"""
-        # Map generic metric types to Datadog metrics
-        metric_mapping = {
-            "cpu": f"avg:system.cpu.user{{service:{service_name}}}",
-            "memory": f"avg:system.mem.used{{service:{service_name}}}",
-            "latency": f"avg:trace.http.request.duration{{service:{service_name}}}",
-            "error_rate": f"sum:trace.servlet.request.errors{{service:{service_name}}}.as_count()",
-            "throughput": f"sum:trace.servlet.request.hits{{service:{service_name}}}.as_count()"
+        """Get metrics from Datadog with multiple query formats for better success rate"""
+        # Map generic metric types to Datadog metrics with multiple formats to try
+        metric_queries = {
+            "cpu": [
+                f"avg:system.cpu.user{{service:{service_name}}}",
+                f"avg:system.cpu.user{{host:{service_name}}}",
+                "avg:system.cpu.user{*}"  # Fallback to all hosts
+            ],
+            "memory": [
+                f"avg:system.mem.used{{service:{service_name}}}",
+                f"avg:system.mem.used{{host:{service_name}}}",
+                "avg:system.mem.used{*}"
+            ],
+            "latency": [
+                f"avg:trace.http.request.duration{{service:{service_name}}}",
+                f"avg:http.request.duration{{service:{service_name}}}",
+                f"avg:trace.http.request.duration{{resource_name:{service_name}}}"
+            ],
+            "error_rate": [
+                f"sum:trace.servlet.request.errors{{service:{service_name}}}.as_count()",
+                f"sum:errors.count{{service:{service_name}}}.as_count()",
+                f"sum:http.errors{{service:{service_name}}}.as_count()"
+            ],
+            "throughput": [
+                f"sum:trace.servlet.request.hits{{service:{service_name}}}.as_count()",
+                f"sum:http.requests{{service:{service_name}}}.as_count()"
+            ]
         }
         
-        datadog_metric = metric_mapping.get(metric_type)
-        if not datadog_metric:
+        queries_to_try = metric_queries.get(metric_type)
+        if not queries_to_try:
             raise ValueError(f"Unsupported metric type: {metric_type}")
         
         # Parse time range
@@ -398,19 +417,42 @@ class APMService:
         # Datadog metrics API endpoint
         url = "https://api.datadoghq.com/api/v1/query"
         
-        payload = {
-            "query": datadog_metric,
-            "from": from_time,
-            "to": now
-        }
+        # Try each query format
+        last_error = None
+        for i, query in enumerate(queries_to_try):
+            logger.info(f"Trying Datadog metric query ({i+1}/{len(queries_to_try)}): {query}")
+            
+            payload = {
+                "query": query,
+                "from": from_time,
+                "to": now
+            }
+            
+            try:
+                response = self.session.get(url, params=payload)
+                
+                if response.status_code == 200:
+                    logger.info(f"Successfully retrieved Datadog metrics with query format {i+1}")
+                    return response.json().get("series", [])
+                else:
+                    last_error = response.text
+                    logger.warning(f"Query format {i+1} failed with status {response.status_code}")
+            except Exception as e:
+                last_error = str(e)
+                logger.error(f"Error with query format {i+1}: {str(e)}")
         
-        logger.info(f"Getting Datadog metrics for service: {service_name}, type: {metric_type}")
-        response = self.session.get(url, params=payload)
+        # If we get here, all queries failed
+        # Check if we should use mock data as fallback
+        if self.extra_params.get("mock_metrics", False):
+            logger.warning("All queries failed. Using mock data as configured in extra_params")
+            return [{
+                "metric": f"system.cpu.{metric_type}",
+                "points": [[now - 900, 45.5], [now - 600, 95.2], [now - 300, 92.1]],
+                "scope": f"service:{service_name}"
+            }]
         
-        if response.status_code != 200:
-            raise Exception(f"Failed to get Datadog metrics: {response.text}")
-        
-        return response.json().get("series", [])
+        # Otherwise, raise exception with the last error
+        raise Exception(f"Failed to get Datadog metrics: {last_error}")
     
     def _dynatrace_get_metrics(self, service_name, metric_type, time_range=None):
         """Get metrics from Dynatrace"""
