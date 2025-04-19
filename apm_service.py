@@ -89,6 +89,17 @@ class APMService:
         if not self.app_key:
             raise ValueError("Datadog requires 'app_key' parameter")
         
+        # Get regional site from extra_params, default to datadoghq.com (US)
+        self.site = self.extra_params.get("site", "us5")  # Default to US5 since that's what you were using
+        
+        # Support for specifying a full domain or just the region code
+        if '.' not in self.site:
+            self.base_url = f"https://api.{self.site}.datadoghq.com"
+        else:
+            self.base_url = f"https://api.{self.site}"
+            
+        logger.info(f"Initializing Datadog client with site: {self.site}")
+        
         self.session = requests.Session()
         self.session.headers.update({
             "DD-API-KEY": self.api_key,
@@ -333,8 +344,8 @@ class APMService:
         # Build query for Datadog Logs API
         query = f"service:{service_name} status:{log_level.lower()}"
         
-        # Datadog logs API endpoint
-        url = "https://api.us5.datadoghq.com/api/v2/logs/events"
+        # Datadog logs API endpoint - use base_url property from self
+        url = f"{self.base_url}/api/v2/logs/events"
         
         params = {
             "filter[query]": query,
@@ -349,8 +360,22 @@ class APMService:
         if response.status_code != 200:
             raise Exception(f"Failed to get Datadog logs: {response.text}")
         
-        logs_data = response.json()
-        return logs_data.get("data", [])
+        # Add sanitization of response to handle invalid control characters
+        try:
+            logs_data = response.json()
+            return logs_data.get("data", [])
+        except json.JSONDecodeError as e:
+            logger.error(f"Error parsing Datadog logs response: {e}")
+            # Try to sanitize the response to remove control characters
+            import re
+            sanitized_text = re.sub(r'[\x00-\x1F\x7F]', '', response.text)
+            try:
+                logs_data = json.loads(sanitized_text)
+                logger.info("Successfully parsed logs after sanitizing response")
+                return logs_data.get("data", [])
+            except:
+                logger.error("Failed to parse logs even after sanitization")
+                return []
     
     def _datadog_get_metrics(self, service_name, metric_type, time_range=None):
         """Get metrics from Datadog with multiple query formats for better success rate"""
@@ -414,8 +439,8 @@ class APMService:
         else:
             from_time = now - 3600  # Default 1 hour
         
-        # Datadog metrics API endpoint
-        url = "https://api.us5.datadoghq.com/api/v1/query"
+        # Datadog metrics API endpoint - use base_url property
+        url = f"{self.base_url}/api/v1/query"
         
         # Try each query format
         last_error = None
@@ -433,7 +458,15 @@ class APMService:
                 
                 if response.status_code == 200:
                     logger.info(f"Successfully retrieved Datadog metrics with query format {i+1}")
-                    return response.json().get("series", [])
+                    # Add sanitization to handle potential JSON parsing errors
+                    try:
+                        return response.json().get("series", [])
+                    except json.JSONDecodeError as e:
+                        logger.error(f"Error parsing Datadog metrics response: {e}")
+                        import re
+                        sanitized_text = re.sub(r'[\x00-\x1F\x7F]', '', response.text)
+                        metrics_data = json.loads(sanitized_text)
+                        return metrics_data.get("series", [])
                 else:
                     last_error = response.text
                     logger.warning(f"Query format {i+1} failed with status {response.status_code}")
@@ -442,16 +475,6 @@ class APMService:
                 logger.error(f"Error with query format {i+1}: {str(e)}")
         
         # If we get here, all queries failed
-        # Check if we should use mock data as fallback
-        if self.extra_params.get("mock_metrics", False):
-            logger.warning("All queries failed. Using mock data as configured in extra_params")
-            return [{
-                "metric": f"system.cpu.{metric_type}",
-                "points": [[now - 900, 45.5], [now - 600, 95.2], [now - 300, 92.1]],
-                "scope": f"service:{service_name}"
-            }]
-        
-        # Otherwise, raise exception with the last error
         raise Exception(f"Failed to get Datadog metrics: {last_error}")
     
     def _dynatrace_get_metrics(self, service_name, metric_type, time_range=None):
