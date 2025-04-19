@@ -439,6 +439,24 @@ class APMService:
         else:
             from_time = now - 3600  # Default 1 hour
         
+        # Function to recursively sanitize data structures
+        def sanitize_data(data):
+            import re
+            control_char_pattern = re.compile(r'[\x00-\x1F\x7F]')
+            
+            if isinstance(data, str):
+                # Remove control characters from strings
+                return control_char_pattern.sub('', data)
+            elif isinstance(data, dict):
+                # Recursively sanitize dictionary values
+                return {k: sanitize_data(v) for k, v in data.items()}
+            elif isinstance(data, list):
+                # Recursively sanitize list items
+                return [sanitize_data(item) for item in data]
+            else:
+                # Return other types unchanged (numbers, None, etc.)
+                return data
+        
         # Datadog metrics API endpoint - use base_url property
         url = f"{self.base_url}/api/v1/query"
         
@@ -460,13 +478,39 @@ class APMService:
                     logger.info(f"Successfully retrieved Datadog metrics with query format {i+1}")
                     # Add sanitization to handle potential JSON parsing errors
                     try:
-                        return response.json().get("series", [])
+                        metrics_data = response.json()
+                        # Sanitize the entire response data structure
+                        sanitized_data = sanitize_data(metrics_data)
+                        series_data = sanitized_data.get("series", [])
+                        
+                        # Verify the sanitized data can be safely JSON serialized
+                        try:
+                            json.dumps(series_data)
+                            logger.info("Successfully verified metrics data JSON serialization")
+                        except Exception as json_e:
+                            logger.error(f"Error in JSON serialization after sanitization: {json_e}")
+                            # If serialization still fails, create a simplified safe version
+                            simplified_data = []
+                            for series in series_data:
+                                # Create a simplified version with just essential data
+                                simple_series = {
+                                    "metric": str(series.get("metric", "unknown")),
+                                    "points": [[p[0], p[1]] for p in series.get("points", [])[:10]],
+                                    "scope": str(series.get("scope", "unknown"))
+                                }
+                                simplified_data.append(simple_series)
+                            return simplified_data
+                        
+                        return series_data
+                        
                     except json.JSONDecodeError as e:
                         logger.error(f"Error parsing Datadog metrics response: {e}")
                         import re
                         sanitized_text = re.sub(r'[\x00-\x1F\x7F]', '', response.text)
                         metrics_data = json.loads(sanitized_text)
-                        return metrics_data.get("series", [])
+                        # Also sanitize after parsing
+                        sanitized_data = sanitize_data(metrics_data)
+                        return sanitized_data.get("series", [])
                 else:
                     last_error = response.text
                     logger.warning(f"Query format {i+1} failed with status {response.status_code}")
