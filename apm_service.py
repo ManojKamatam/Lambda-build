@@ -334,7 +334,7 @@ class APMService:
         query = f"service:{service_name} status:{log_level.lower()}"
         
         # Datadog logs API endpoint
-        url = "https://api.datadoghq.com/api/v2/logs/events"
+        url = "https://api.us5.datadoghq.com/api/v2/logs/events"
         
         params = {
             "filter[query]": query,
@@ -415,7 +415,7 @@ class APMService:
             from_time = now - 3600  # Default 1 hour
         
         # Datadog metrics API endpoint
-        url = "https://api.datadoghq.com/api/v1/query"
+        url = "https://api.us5.datadoghq.com/api/v1/query"
         
         # Try each query format
         last_error = None
