@@ -1161,6 +1161,67 @@ def filter_files_by_extensions(file_list):
     
     return filtered_files
 
+def create_analysis_summary(problem_info, component_files, semantic_files, 
+                            tool_results, analysis, relevant_files):
+    """
+    Create a comprehensive summary of the analysis process for debugging/reporting
+    """
+    summary = {
+        "problem_info": {
+            "title": problem_info.get('title'),
+            "service_name": problem_info.get('service_names', ['unknown'])[0],
+            "severity": problem_info.get('severity', 'UNKNOWN'),
+            "components_detected": problem_info.get('components', [])
+        },
+        "file_discovery": {
+            "component_search": {
+                "files_found": len(component_files),
+                "file_paths": list(component_files.keys()) if component_files else []
+            },
+            "semantic_search": {
+                "performed": len(component_files) == 0,
+                "files_found": len(semantic_files) if semantic_files else 0, 
+                "file_paths": list(semantic_files.keys()) if semantic_files else []
+            }
+        },
+        "apm_tool_usage": {
+            "tools_called": [],
+            "errors_encountered": []
+        },
+        "analysis_result": {
+            "action": analysis.get('action', 'needs_more_info'),
+            "explanation": analysis.get('explanation', 'No explanation provided'),
+            "total_files_analyzed": len(relevant_files)
+        }
+    }
+    
+    # Add APM tool details if available
+    if tool_results:
+        for result in tool_results:
+            tool_info = {
+                "tool": result.get('tool_name'),
+                "parameters": result.get('parameters', {}),
+                "success": result.get('result') is not None and not isinstance(result.get('result'), str)
+            }
+            
+            # Check for errors in tool execution
+            if isinstance(result.get('result'), str) and 'error' in result.get('result', '').lower():
+                tool_info["error"] = result.get('result')
+                summary["apm_tool_usage"]["errors_encountered"].append({
+                    "tool": result.get('tool_name'),
+                    "error": result.get('result')
+                })
+            elif not result.get('result'):
+                tool_info["error"] = "No data returned"
+                summary["apm_tool_usage"]["errors_encountered"].append({
+                    "tool": result.get('tool_name'),
+                    "error": "No data returned"
+                })
+                
+            summary["apm_tool_usage"]["tools_called"].append(tool_info)
+    
+    return summary
+
 def send_notification(title, message):
     """Send a notification to the configured webhook"""
     if not NOTIFICATION_WEBHOOK:
