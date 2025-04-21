@@ -188,7 +188,7 @@ class AIService:
                     "properties": {
                         "service_name": {
                             "type": "string",
-                            "description": "Service name to get logs for"
+                            "description": "Service name to get logs for (use base service name without port numbers or colons)"
                         },
                         "time_range": {
                             "type": "string",
