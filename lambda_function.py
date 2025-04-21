@@ -662,32 +662,99 @@ def lambda_handler(event, context):
             }
             
         else:  # needs_more_info
-            # Create investigation ticket
-            logger.info("Creating investigation ticket for more information")
+            # Create investigation ticket with comprehensive details
+            logger.info("Creating investigation ticket with comprehensive analysis details")
+            
+            # Get detailed analysis summary
+            analysis_summary = create_analysis_summary(
+                problem_info=problem_info,
+                component_files=component_files,
+                semantic_files={} if component_files else relevant_files,
+                tool_results=analysis.get('tool_results', []),
+                analysis=analysis,
+                relevant_files=relevant_files
+            )
+            
+            # Format detailed description with summary
+            detailed_description = f"""
+            # Investigation Needed: {problem_info.get('title')}
+            
+            ## Problem Information
+            - **Title**: {problem_info.get('title')}
+            - **Severity**: {problem_info.get('severity')}
+            - **Service**: {', '.join(problem_info.get('service_names', ['Unknown']))}
+            - **Components Detected**: {', '.join(problem_info.get('components', ['None']))}
+            
+            ## Analysis Process
+            
+            ### File Discovery
+            - **Component-based search**: {len(component_files)} files found
+            - **Semantic search**: {'Performed' if not component_files else 'Not needed'} 
+              - Files found: {len(relevant_files) if not component_files else 'N/A'}
+            
+            ### Files Analyzed
+            {', '.join(relevant_files.keys())[:800] + '...' if len(', '.join(relevant_files.keys())) > 800 else ', '.join(relevant_files.keys())}
+            
+            ### APM Tool Usage
+            """
+            
+            # Add tool information
+            if analysis.get('tool_results'):
+                for result in analysis.get('tool_results'):
+                    tool_name = result.get('tool_name', 'unknown_tool')
+                    params = result.get('parameters', {})
+                    detailed_description += f"\n- **{tool_name}** "
+                    detailed_description += f"(service: {params.get('service_name', 'unknown')}, "
+                    
+                    if tool_name == 'get_additional_logs':
+                        detailed_description += f"level: {params.get('log_level', 'ERROR')}, "
+                        detailed_description += f"time range: {params.get('time_range', '1h')}): "
+                    elif tool_name == 'get_service_metrics':
+                        detailed_description += f"metric: {params.get('metric_type', 'unknown')}, "
+                        detailed_description += f"time range: {params.get('time_range', '1h')}): "
+                    
+                    # Check if we got actual data or an error
+                    if isinstance(result.get('result'), list) and result.get('result'):
+                        if tool_name == 'get_additional_logs':
+                            detailed_description += f"\n  - **Result**: {len(result.get('result'))} log entries found"
+                        else:
+                            detailed_description += f"\n  - **Result**: Data retrieved successfully"
+                    else:
+                        detailed_description += f"\n  - **Error**: {str(result.get('result', 'No data returned'))}"
+            else:
+                detailed_description += "\nNo APM tools were used or all attempts failed."
+            
+            # Add AI analysis and needed information
+            detailed_description += f"""
+            
+            ## AI Analysis
+            {analysis.get('explanation')}
+            
+            ## Needed Information
+            {analysis.get('details', {}).get('needed_info', 'Additional context is required')}
+            
+            ## Technical Debug Information
+            ```json
+            {json.dumps(analysis_summary, indent=2)}
+            ```
+            """
+            
             ticket_id = ticket_service.create_ticket(
                 f"Investigation Needed: {problem_info.get('title', 'Alert')}",
-                f"""
-                This alert requires more information to determine the appropriate action.
-                
-                Problem: {problem_info.get('title')}
-                Severity: {problem_info.get('severity')}
-                
-                AI Analysis: {analysis.get('explanation')}
-                
-                Needed Information: {analysis.get('details', {}).get('needed_info', 'Additional context is required')}
-                """,
-                labels=["investigation-needed", "auto-generated"]
+                detailed_description,
+                labels=["investigation-needed", "auto-generated", "ai-response"]
             )
             
             send_notification(f"Investigation Needed: {problem_info.get('title')}", 
-                             f"An alert requires more information for proper analysis.\n\nTicket ID: {ticket_id}")
+                             f"An alert requires more information for analysis.\n\nTicket ID: {ticket_id}\n\nSummary: {len(relevant_files)} files analyzed, {len(analysis.get('tool_results', []))} APM tools used.")
             
             return {
                 'statusCode': 200,
                 'body': json.dumps({
                     'action': 'needs_more_info',
                     'ticket_id': ticket_id,
-                    'needed_info': analysis.get('details', {}).get('needed_info', 'Additional context is required')
+                    'needed_info': analysis.get('details', {}).get('needed_info', 'Additional context is required'),
+                    'analysis_summary': analysis_summary
                 })
             }
         
