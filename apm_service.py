@@ -286,7 +286,12 @@ class APMService:
 
     def _datadog_get_logs(self, service_name, time_range=None, log_level="ERROR"):
         """Get logs from Datadog"""
-        # Parse time_range string if provided in that format
+        # Sanitize service name by removing port/colon
+        if ':' in service_name:
+            clean_service_name = service_name.split(':', 1)[0]
+            logger.info(f"Sanitized service name from {service_name} to {clean_service_name}")
+            service_name = clean_service_name
+            # Parse time_range string if provided in that format
         if isinstance(time_range, str):
             end_time = datetime.utcnow()
             
