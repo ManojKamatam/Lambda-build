@@ -619,7 +619,7 @@ class AIService:
         system_prompt = """
         You are a technical support specialist creating detailed tickets for engineering issues.
         Based on the problem information and analysis, create a well-structured ticket with:
-
+    
         1. A clear, concise title that summarizes the core issue
         2. A detailed description that includes:
            - Problem summary
@@ -628,16 +628,16 @@ class AIService:
            - Any known workarounds
            - Suggested investigation approach
         3. Appropriate priority level (Critical, High, Medium, Low)
-        4. Recommended labels/tags for categorization
+        4. Recommended labels/tags for categorization (IMPORTANT: labels must be single words with no spaces, use hyphens instead)
         5. Suggested assignee type (Frontend, Backend, DevOps, etc.)
-
+    
         Return this information in JSON format like:
         ```json
         {
           "title": "Clear ticket title",
           "description": "Detailed description",
           "priority": "High/Medium/Low",
-          "tags": ["tag1", "tag2"],
+          "tags": ["single-word-tag", "another-tag"],
           "assignee_type": "DevOps"
         }
         ```
@@ -654,6 +654,7 @@ class AIService:
         {analysis.get('explanation', 'No explanation provided')}
         
         Please create a detailed ticket for this issue.
+        IMPORTANT: Use only single-word tags with no spaces - use hyphens for multi-word tags (e.g., "code-optimization", not "Code Optimization").
         """
         
         # Use Claude Sonnet for ticket creation
@@ -674,18 +675,17 @@ class AIService:
                 json_match = re.search(r'```json\s*(.*?)\s*```', response_text, re.DOTALL)
                 if json_match:
                     ticket_info = json.loads(json_match.group(1))
-                    return ticket_info
                 else:
                     # If no JSON found, try to parse the whole response
                     try:
                         json_like = re.search(r'({.*})', response_text.replace('\n', ' '), re.DOTALL)
                         if json_like:
-                            return json.loads(json_like.group(1))
+                            ticket_info = json.loads(json_like.group(1))
                         else:
                             # Create a basic structure based on text
                             lines = response_text.split('\n')
                             title = next((line for line in lines if line.strip()), "Issue from alert")
-                            return {
+                            ticket_info = {
                                 "title": title[:80],
                                 "description": response_text,
                                 "priority": "Medium",
@@ -693,12 +693,23 @@ class AIService:
                             }
                     except json.JSONDecodeError:
                         # Create a simple structure
-                        return {
+                        ticket_info = {
                             "title": problem_info.get('title', 'Issue from alert')[:80],
                             "description": response_text,
                             "priority": "Medium",
                             "tags": ["auto-generated"]
                         }
+                
+                # Format tags properly for JIRA regardless of how AI provided them
+                if "tags" in ticket_info:
+                    formatted_tags = []
+                    for tag in ticket_info["tags"]:
+                        # Replace spaces with hyphens and make lowercase
+                        formatted_tag = tag.replace(' ', '-').lower()
+                        formatted_tags.append(formatted_tag)
+                    ticket_info["tags"] = formatted_tags
+                
+                return ticket_info
                 
             except Exception as e:
                 if attempt < max_retries - 1:
