@@ -625,10 +625,18 @@ def lambda_handler(event, context):
             return {
                 'statusCode': 200,
                 'body': json.dumps({
-                    'action': 'code_fix',
+                    'action': 'fix_code',
+                    'explanation': analysis.get('explanation'),
+                    'analysis_process': {
+                        'component_search_files': len(component_files),
+                        'semantic_search_used': len(component_files) == 0,
+                        'apm_tools_used': len(analysis.get('tool_results', [])) if isinstance(analysis, dict) and 'tool_results' in analysis else 0,
+                        'files_analyzed': len(relevant_files)
+                    },
                     'pr_url': pr_url,
                     'branch': branch_name,
-                    'updated_files': list(updated_files.keys())
+                    'updated_files': list(updated_files.keys()),
+                    'detail': 'Pull request created with automated fix'
                 })
             }
             
