@@ -81,25 +81,33 @@ class VCSService:
         # Get username from extra params or environment
         self.username = self.extra_params.get("username") or os.environ.get("BITBUCKET_USERNAME", "")
         
+        # Validate we have required credentials
+        if not self.username or not self.token:
+            logger.error("Missing Bitbucket credentials: username or token is empty")
+        else:
+            logger.info(f"Using Bitbucket authentication with username: {self.username}")
+        
         self.session = requests.Session()
         
-        # If we have a username, use Basic Auth with app password
+        # If we have a username, use Basic Auth with app password (no spaces allowed in username)
         if self.username:
+            # Remove any whitespace from username and token
+            username = self.username.strip()
+            token = self.token.strip() if self.token else ""
+            
             # Use Basic Authentication with app password
-            auth = f"{self.username}:{self.token}"
+            auth = f"{username}:{token}"
             auth_encoded = base64.b64encode(auth.encode()).decode()
             self.session.headers.update({
                 "Authorization": f"Basic {auth_encoded}",
                 "Content-Type": "application/json"
             })
-            logger.info(f"Bitbucket client initialized with Basic Auth for workspace: {self.workspace}")
         else:
             # Fall back to Bearer token (OAuth)
             self.session.headers.update({
                 "Authorization": f"Bearer {self.token}",
                 "Content-Type": "application/json"
             })
-            logger.info(f"Bitbucket client initialized with Bearer Auth for workspace: {self.workspace}")
         
         self.api_base_url = "https://api.bitbucket.org/2.0"
         logger.info(f"Bitbucket client initialized for workspace: {self.workspace}")
