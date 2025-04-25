@@ -840,7 +840,7 @@ class VCSService:
     
     def _bitbucket_update_file(self, repo: str, path: str, content: str, commit_msg: str, branch: str) -> bool:
         """
-        Update a file in Bitbucket - properly handles HTTP headers for file uploads.
+        Update a file in Bitbucket - properly handles HTTP headers for multipart uploads.
         """
         try:
             # Check for changes
@@ -853,35 +853,32 @@ class VCSService:
             except Exception as e:
                 logger.info(f"Could not compare file contents: {str(e)} - proceeding with update")
             
-            # Save original headers - critical for Bitbucket!
-            original_headers = self.session.headers.copy()
+            # IMPORTANT: Create a new session just for this file upload
+            # This avoids contaminating the global session headers
+            upload_session = requests.Session()
             
-            # IMPORTANT: Remove Content-Type header temporarily
-            # This is necessary because multipart/form-data needs its own Content-Type
-            if 'Content-Type' in self.session.headers:
-                del self.session.headers['Content-Type']
+            # Copy authentication headers but NOT content-type
+            for key, value in self.session.headers.items():
+                if key.lower() != 'content-type':
+                    upload_session.headers[key] = value
             
-            # Prepare form data
+            # Prepare form data and files
             form_data = {
                 'message': commit_msg,
                 'branch': branch
             }
             
-            # Prepare file data
             files_data = {path: (None, content)}
             
-            # Make API request
+            # Make API request with clean headers
             url = f"{self.api_base_url}/repositories/{self.workspace}/{repo}/src"
-            logger.info(f"Sending Bitbucket update with proper headers: file={path}")
+            logger.info(f"Sending Bitbucket update with dedicated session: file={path}")
             
-            response = self.session.post(
+            response = upload_session.post(
                 url,
                 data=form_data,
                 files=files_data
             )
-            
-            # Restore original headers
-            self.session.headers = original_headers
             
             # Enhanced error logging
             if response.status_code >= 400:
@@ -893,6 +890,8 @@ class VCSService:
                     logger.error(f"Error details: {error_data}")
                 except:
                     pass
+                
+                return False
             
             success = response.status_code in (200, 201)
             if success:
