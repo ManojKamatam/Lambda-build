@@ -842,9 +842,27 @@ class VCSService:
         # First check if the file exists and compare content to see if actually changed
         try:
             existing_content = self._bitbucket_get_content(repo, path, branch)
-            if existing_content == content:
-                logger.warning(f"AI suggested update to {path} matches existing content - no actual changes")
-                return False  # Return false to indicate no changes were made
+            
+            # Check for critical changes like commented imports that should always be updated
+            if path.endswith('.py') and ('#import' in existing_content or '#from' in existing_content):
+                # Look for imports that might be uncommented in the new content
+                commented_pattern = re.compile(r'#\s*(import|from)\s+')
+                uncommented_pattern = re.compile(r'^\s*(import|from)\s+', re.MULTILINE)
+                
+                commented_imports_existing = bool(commented_pattern.search(existing_content))
+                uncommented_imports_new = bool(uncommented_pattern.search(content))
+                
+                # Force update if uncommenting imports
+                if commented_imports_existing and uncommented_imports_new:
+                    logger.info(f"Critical change detected: Potentially uncommenting imports in {path}")
+                elif existing_content.strip() == content.strip():
+                    logger.warning(f"AI suggested update to {path} matches existing content - no actual changes")
+                    return False  # Return false to indicate no changes were made
+            else:
+                # For non-Python files, normalize whitespace before comparison
+                if self._normalize_content(existing_content) == self._normalize_content(content):
+                    logger.warning(f"AI suggested update to {path} matches existing content - no actual changes")
+                    return False  # Return false to indicate no changes were made
         except Exception as e:
             logger.info(f"Could not compare file contents: {str(e)}")
         
@@ -865,6 +883,15 @@ class VCSService:
         )
         
         return response.status_code in (200, 201)
+
+def _normalize_content(self, content):
+    """Normalize content for more accurate comparison"""
+    if not content:
+        return ""
+    
+    # Split into lines, strip whitespace from each line, and rejoin
+    lines = [line.strip() for line in content.splitlines()]
+    return '\n'.join(lines)
     
     def _bitbucket_create_pr(self, repo: str, title: str, body: str, head: str, base: str) -> str:
         """Create a pull request in Bitbucket"""
