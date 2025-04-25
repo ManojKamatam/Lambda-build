@@ -765,9 +765,12 @@ class VCSService:
     def _bitbucket_get_directory_contents(self, repo: str, path: str, ref: str, all_files: List[str]):
         """Recursively get all files in a Bitbucket directory"""
         url = f"{self.api_base_url}/repositories/{self.workspace}/{repo}/src/{ref}/{path}"
+        logger.info(f"Bitbucket API request: {url}")
         response = self.session.get(url)
+        logger.info(f"Bitbucket response status: {response.status_code}")
         
         if response.status_code != 200:
+            logger.error(f"Bitbucket API error: {response.text}")
             return
         
         data = response.json()
