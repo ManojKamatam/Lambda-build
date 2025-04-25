@@ -840,54 +840,54 @@ class VCSService:
     
     def _bitbucket_update_file(self, repo: str, path: str, content: str, commit_msg: str, branch: str) -> bool:
         """
-        Update a file in Bitbucket with a generic implementation that works for any file type.
-        Ensures proper API formatting for reliable updates.
+        Update a file in Bitbucket - properly handles HTTP headers for file uploads.
         """
-        change_detected = True
-        
         try:
-            # Get existing content for comparison
-            existing_content = self._bitbucket_get_content(repo, path, branch)
+            # Check for changes
+            try:
+                existing_content = self._bitbucket_get_content(repo, path, branch)
+                if existing_content == content:
+                    logger.warning(f"File {path} content is identical - skipping update")
+                    return False
+                logger.info(f"Changes detected in {path} - proceeding with update")
+            except Exception as e:
+                logger.info(f"Could not compare file contents: {str(e)} - proceeding with update")
             
-            # Simple binary comparison - don't update if identical
-            if existing_content == content:
-                logger.warning(f"File {path} content is identical - skipping update")
-                return False
-                
-            logger.info(f"Changes detected in {path} - proceeding with update")
+            # Save original headers - critical for Bitbucket!
+            original_headers = self.session.headers.copy()
             
-        except Exception as e:
-            # If we can't get existing content, proceed with update
-            logger.info(f"Could not compare file contents: {str(e)} - proceeding with update")
-        
-        # Prepare the request
-        # NOTE: Bitbucket API is sensitive to the format - this is the correct format
-        form_data = {
-            'message': commit_msg,
-            'branch': branch
-        }
-        
-        # Prepare the file - this exact format is important for Bitbucket
-        files_data = {path: (None, content)}
-        
-        # Debug logging
-        logger.info(f"Sending update to Bitbucket: file={path}, branch={branch}")
-        
-        try:
-            # Make the API request
+            # IMPORTANT: Remove Content-Type header temporarily
+            # This is necessary because multipart/form-data needs its own Content-Type
+            if 'Content-Type' in self.session.headers:
+                del self.session.headers['Content-Type']
+            
+            # Prepare form data
+            form_data = {
+                'message': commit_msg,
+                'branch': branch
+            }
+            
+            # Prepare file data
+            files_data = {path: (None, content)}
+            
+            # Make API request
             url = f"{self.api_base_url}/repositories/{self.workspace}/{repo}/src"
+            logger.info(f"Sending Bitbucket update with proper headers: file={path}")
+            
             response = self.session.post(
                 url,
                 data=form_data,
                 files=files_data
             )
             
+            # Restore original headers
+            self.session.headers = original_headers
+            
             # Enhanced error logging
             if response.status_code >= 400:
                 logger.error(f"Bitbucket API error: {response.status_code}")
                 logger.error(f"Response: {response.text}")
                 
-                # Try to parse error details if available
                 try:
                     error_data = response.json()
                     logger.error(f"Error details: {error_data}")
