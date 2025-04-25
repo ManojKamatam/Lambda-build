@@ -1,4 +1,5 @@
 # vcs_service.py
+import re
 import requests
 import json
 import base64
@@ -838,35 +839,40 @@ class VCSService:
         return response.status_code == 201
     
     def _bitbucket_update_file(self, repo: str, path: str, content: str, commit_msg: str, branch: str) -> bool:
-        """Update a file in Bitbucket"""
-        # First check if the file exists and compare content to see if actually changed
+        """
+        Update a file in Bitbucket - robust implementation that always applies changes
+        unless content is exactly identical.
+        """
+        # Always attempt to update the file by default
+        force_update = False
+        
         try:
+            # Get existing content
             existing_content = self._bitbucket_get_content(repo, path, branch)
             
-            # Check for critical changes like commented imports that should always be updated
-            if path.endswith('.py') and ('#import' in existing_content or '#from' in existing_content):
-                # Look for imports that might be uncommented in the new content
-                commented_pattern = re.compile(r'#\s*(import|from)\s+')
-                uncommented_pattern = re.compile(r'^\s*(import|from)\s+', re.MULTILINE)
+            # Check for exact match
+            if existing_content != content:
+                # Different content - proceed with update
+                logger.info(f"Changes detected in {path} - proceeding with update")
                 
-                commented_imports_existing = bool(commented_pattern.search(existing_content))
-                uncommented_imports_new = bool(uncommented_pattern.search(content))
-                
-                # Force update if uncommenting imports
-                if commented_imports_existing and uncommented_imports_new:
-                    logger.info(f"Critical change detected: Potentially uncommenting imports in {path}")
-                elif existing_content.strip() == content.strip():
-                    logger.warning(f"AI suggested update to {path} matches existing content - no actual changes")
-                    return False  # Return false to indicate no changes were made
+                # Special case: check for uncommented imports in Python files
+                if path.endswith('.py'):
+                    # Look for commented imports that are now uncommented
+                    commented_import_pattern = re.compile(r'#\s*(import\s+|from\s+[\w\.]+\s+import)')
+                    if commented_import_pattern.search(existing_content) and not commented_import_pattern.search(content):
+                        logger.info(f"Critical change detected: potentially uncommenting imports in {path}")
+                        force_update = True
             else:
-                # For non-Python files, normalize whitespace before comparison
-                if self._normalize_content(existing_content) == self._normalize_content(content):
-                    logger.warning(f"AI suggested update to {path} matches existing content - no actual changes")
-                    return False  # Return false to indicate no changes were made
+                # If content is identical, don't update
+                logger.warning(f"File {path} content is identical - skipping update")
+                return False
+                
         except Exception as e:
-            logger.info(f"Could not compare file contents: {str(e)}")
+            # If we can't get existing content or any other error, force the update
+            logger.info(f"Could not compare file contents (file may be new): {str(e)} - proceeding with update")
+            force_update = True
         
-        # Continue with normal update process for changed files
+        # Proceed with file update
         files = {
             path: (None, content)
         }
@@ -882,16 +888,13 @@ class VCSService:
             files=files
         )
         
-        return response.status_code in (200, 201)
-
-def _normalize_content(self, content):
-    """Normalize content for more accurate comparison"""
-    if not content:
-        return ""
-    
-    # Split into lines, strip whitespace from each line, and rejoin
-    lines = [line.strip() for line in content.splitlines()]
-    return '\n'.join(lines)
+        success = response.status_code in (200, 201)
+        if success:
+            logger.info(f"Successfully updated {path}")
+        else:
+            logger.error(f"Failed to update {path}: {response.status_code} - {response.text}")
+        
+        return success
     
     def _bitbucket_create_pr(self, repo: str, title: str, body: str, head: str, base: str) -> str:
         """Create a pull request in Bitbucket"""
