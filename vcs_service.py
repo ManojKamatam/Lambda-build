@@ -840,61 +840,69 @@ class VCSService:
     
     def _bitbucket_update_file(self, repo: str, path: str, content: str, commit_msg: str, branch: str) -> bool:
         """
-        Update a file in Bitbucket - robust implementation that always applies changes
-        unless content is exactly identical.
+        Update a file in Bitbucket with a generic implementation that works for any file type.
+        Ensures proper API formatting for reliable updates.
         """
-        # Always attempt to update the file by default
-        force_update = False
+        change_detected = True
         
         try:
-            # Get existing content
+            # Get existing content for comparison
             existing_content = self._bitbucket_get_content(repo, path, branch)
             
-            # Check for exact match
-            if existing_content != content:
-                # Different content - proceed with update
-                logger.info(f"Changes detected in {path} - proceeding with update")
-                
-                # Special case: check for uncommented imports in Python files
-                if path.endswith('.py'):
-                    # Look for commented imports that are now uncommented
-                    commented_import_pattern = re.compile(r'#\s*(import\s+|from\s+[\w\.]+\s+import)')
-                    if commented_import_pattern.search(existing_content) and not commented_import_pattern.search(content):
-                        logger.info(f"Critical change detected: potentially uncommenting imports in {path}")
-                        force_update = True
-            else:
-                # If content is identical, don't update
+            # Simple binary comparison - don't update if identical
+            if existing_content == content:
                 logger.warning(f"File {path} content is identical - skipping update")
                 return False
                 
+            logger.info(f"Changes detected in {path} - proceeding with update")
+            
         except Exception as e:
-            # If we can't get existing content or any other error, force the update
-            logger.info(f"Could not compare file contents (file may be new): {str(e)} - proceeding with update")
-            force_update = True
+            # If we can't get existing content, proceed with update
+            logger.info(f"Could not compare file contents: {str(e)} - proceeding with update")
         
-        # Proceed with file update
-        files = {
-            path: (None, content)
+        # Prepare the request
+        # NOTE: Bitbucket API is sensitive to the format - this is the correct format
+        form_data = {
+            'message': commit_msg,
+            'branch': branch
         }
         
-        data = {
-            "message": commit_msg,
-            "branch": branch
-        }
+        # Prepare the file - this exact format is important for Bitbucket
+        files_data = {path: (None, content)}
         
-        response = self.session.post(
-            f"{self.api_base_url}/repositories/{self.workspace}/{repo}/src",
-            data=data,
-            files=files
-        )
+        # Debug logging
+        logger.info(f"Sending update to Bitbucket: file={path}, branch={branch}")
         
-        success = response.status_code in (200, 201)
-        if success:
-            logger.info(f"Successfully updated {path}")
-        else:
-            logger.error(f"Failed to update {path}: {response.status_code} - {response.text}")
-        
-        return success
+        try:
+            # Make the API request
+            url = f"{self.api_base_url}/repositories/{self.workspace}/{repo}/src"
+            response = self.session.post(
+                url,
+                data=form_data,
+                files=files_data
+            )
+            
+            # Enhanced error logging
+            if response.status_code >= 400:
+                logger.error(f"Bitbucket API error: {response.status_code}")
+                logger.error(f"Response: {response.text}")
+                
+                # Try to parse error details if available
+                try:
+                    error_data = response.json()
+                    logger.error(f"Error details: {error_data}")
+                except:
+                    pass
+            
+            success = response.status_code in (200, 201)
+            if success:
+                logger.info(f"Successfully updated {path}")
+            
+            return success
+            
+        except Exception as e:
+            logger.error(f"Exception during Bitbucket API call: {str(e)}")
+            return False
     
     def _bitbucket_create_pr(self, repo: str, title: str, body: str, head: str, base: str) -> str:
         """Create a pull request in Bitbucket"""
