@@ -581,10 +581,14 @@ def lambda_handler(event, context):
             if not updated_files:
                 logger.warning("No file updates generated despite 'fix_code' action")
                 send_notification("No File Updates Generated", 
-                                 f"AI analysis suggested a code fix but no updates were generated for: {problem_info.get('title')}")
+                                 f"AI analysis suggested a code fix but no updates were needed for: {problem_info.get('title')}")
                 return {
                     'statusCode': 200,
-                    'body': json.dumps('No file updates were generated')
+                    'body': json.dumps({
+                        'action': 'no_changes_needed',
+                        'explanation': analysis.get('explanation'),
+                        'detail': 'AI suggested changes matched existing code'
+                    })
                 }
             
             # Create branch, update files, and create PR
