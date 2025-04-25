@@ -78,11 +78,29 @@ class VCSService:
         if not self.workspace:
             raise ValueError("Bitbucket requires 'workspace' parameter in VCS_EXTRA_PARAMS")
         
+        # Get username from extra params or environment
+        self.username = self.extra_params.get("username") or os.environ.get("BITBUCKET_USERNAME", "")
+        
         self.session = requests.Session()
-        self.session.headers.update({
-            "Authorization": f"Bearer {self.token}",
-            "Content-Type": "application/json"
-        })
+        
+        # If we have a username, use Basic Auth with app password
+        if self.username:
+            # Use Basic Authentication with app password
+            auth = f"{self.username}:{self.token}"
+            auth_encoded = base64.b64encode(auth.encode()).decode()
+            self.session.headers.update({
+                "Authorization": f"Basic {auth_encoded}",
+                "Content-Type": "application/json"
+            })
+            logger.info(f"Bitbucket client initialized with Basic Auth for workspace: {self.workspace}")
+        else:
+            # Fall back to Bearer token (OAuth)
+            self.session.headers.update({
+                "Authorization": f"Bearer {self.token}",
+                "Content-Type": "application/json"
+            })
+            logger.info(f"Bitbucket client initialized with Bearer Auth for workspace: {self.workspace}")
+        
         self.api_base_url = "https://api.bitbucket.org/2.0"
         logger.info(f"Bitbucket client initialized for workspace: {self.workspace}")
     
