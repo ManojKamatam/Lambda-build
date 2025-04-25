@@ -601,15 +601,32 @@ def lambda_handler(event, context):
             
             # Update files
             logger.info(f"Updating {len(updated_files)} files")
+            # Track whether any actual changes were made
+            any_changes_made = False
             for file_path, content in updated_files.items():
-                vcs_service.update_file(
+                result = vcs_service.update_file(
                     repo,
                     file_path,
                     content,
                     f"AI fix for {problem_info.get('title', 'issue')}",
                     branch_name
                 )
+                any_changes_made = any_changes_made or result
             
+            # Only create PR if actual changes were made
+            if not any_changes_made:
+                logger.warning("No actual changes were made to files - skipping PR creation")
+                send_notification("No File Changes Needed", 
+                                f"AI analysis suggested a code fix but all changes matched existing code for: {problem_info.get('title')}")
+                return {
+                    'statusCode': 200,
+                    'body': json.dumps({
+                        'action': 'no_changes_needed',
+                        'explanation': analysis.get('explanation'),
+                        'detail': 'AI suggested changes matched existing code'
+                    })
+                }
+
             # Create PR
             pr_title = f"AI Fix: {problem_info.get('title', 'Fix for detected issue')}"
             pr_body = f"""
