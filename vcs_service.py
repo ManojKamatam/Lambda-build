@@ -839,7 +839,16 @@ class VCSService:
     
     def _bitbucket_update_file(self, repo: str, path: str, content: str, commit_msg: str, branch: str) -> bool:
         """Update a file in Bitbucket"""
-        # Bitbucket uses a form-data approach for file updates
+        # First check if the file exists and compare content to see if actually changed
+        try:
+            existing_content = self._bitbucket_get_content(repo, path, branch)
+            if existing_content == content:
+                logger.warning(f"AI suggested update to {path} matches existing content - no actual changes")
+                return False  # Return false to indicate no changes were made
+        except Exception as e:
+            logger.info(f"Could not compare file contents: {str(e)}")
+        
+        # Continue with normal update process for changed files
         files = {
             path: (None, content)
         }
