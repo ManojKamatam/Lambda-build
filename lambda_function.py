@@ -189,8 +189,20 @@ def lambda_handler(event, context):
         
         # Get a list of repository files
         logger.info(f"Attempting to get files from repository: {repo}")
+
+        # ADD THIS BLOCK HERE - right after the log statement above
+        # IMPORTANT: For Bitbucket, modify the repository reference format
+        if vcs_service.vcs_type == "bitbucket":
+            # For Bitbucket, only use the repo name without owner
+            repo = repo_info['repo']  # Just use the repo name alone
+            logger.info(f"Modified for Bitbucket: using repo name only: {repo}")
+        else:
+            # For other providers like GitHub, use owner/repo format
+            repo = f"{repo_info['owner']}/{repo_info['repo']}"
+        # END OF NEW BLOCK
+        
         file_list = vcs_service.get_repository_files(repo)
-        logger.info(f"Retrieved {len(file_list)} files from GitHub repository")
+        logger.info(f"Retrieved {len(file_list)} files from {vcs_service.vcs_type} repository")
         
         # Log a sample of files if available
         if file_list:
