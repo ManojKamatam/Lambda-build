@@ -92,10 +92,15 @@ class APMService:
         # Get regional site from extra_params, default to datadoghq.com (US)
         self.site = self.extra_params.get("site", "us5")  # Default to US5 since that's what you were using
         
-        # Support for specifying a full domain or just the region code
-        if '.' not in self.site:
+        # Support for different site formats
+        if not self.site or self.site.lower() == "app":
+            # Main Datadog site (no region)
+            self.base_url = "https://api.datadoghq.com"
+        elif '.' not in self.site:
+            # Regional site (us5, eu1, etc)
             self.base_url = f"https://api.{self.site}.datadoghq.com"
         else:
+            # Full custom domain
             self.base_url = f"https://api.{self.site}"
             
         logger.info(f"Initializing Datadog client with site: {self.site}")
