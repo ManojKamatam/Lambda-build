@@ -68,44 +68,76 @@ def get_secret_param(param_name, default=None):
         logger.error(f"Error loading {param_name}: {str(e)}")
         return default
 
-# Environment configuration - now using secrets with fallbacks
-ANTHROPIC_API_KEY = secrets.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
-VCS_TYPE = os.environ.get("VCS_TYPE")
-# Modify the environment configuration to explicitly log token source
-VCS_TOKEN = None
-if "VCS_TOKEN" in secrets:
-    VCS_TOKEN = secrets.get("VCS_TOKEN")
-    logger.info("Loaded GitHub token from Secrets Manager")
-elif "VCS_TOKEN" in os.environ:
-    VCS_TOKEN = os.environ.get("VCS_TOKEN")
-    logger.info("Loaded GitHub token from environment variables")
-else:
-    logger.warning("No GitHub token found in Secrets Manager or environment variables")
-# Use safer JSON loading for secrets
+# Environment configuration - using get_secret_param for consistent loading
+ANTHROPIC_API_KEY = get_secret_param("ANTHROPIC_API_KEY")
+VCS_TYPE = get_secret_param("VCS_TYPE", os.environ.get("VCS_TYPE"))
+VCS_TOKEN = get_secret_param("VCS_TOKEN")
+
+# Safely load VCS_EXTRA_PARAMS
 VCS_EXTRA_PARAMS = {}
 try:
-    if "VCS_EXTRA_PARAMS" in secrets:
-        if isinstance(secrets.get("VCS_EXTRA_PARAMS"), dict):
-            VCS_EXTRA_PARAMS = secrets.get("VCS_EXTRA_PARAMS")
-            logger.info("Loaded VCS_EXTRA_PARAMS as dictionary from Secrets Manager")
+    vcs_extra_raw = get_secret_param("VCS_EXTRA_PARAMS")
+    if vcs_extra_raw:
+        if isinstance(vcs_extra_raw, dict):
+            VCS_EXTRA_PARAMS = vcs_extra_raw
+            logger.info("Loaded VCS_EXTRA_PARAMS as dictionary")
         else:
             # Try parsing as JSON string
-            VCS_EXTRA_PARAMS = json.loads(secrets.get("VCS_EXTRA_PARAMS"))
-            logger.info("Loaded VCS_EXTRA_PARAMS as JSON string from Secrets Manager")
+            VCS_EXTRA_PARAMS = json.loads(vcs_extra_raw)
+            logger.info("Loaded VCS_EXTRA_PARAMS as JSON string")
     elif "VCS_EXTRA_PARAMS" in os.environ:
         VCS_EXTRA_PARAMS = json.loads(os.environ.get("VCS_EXTRA_PARAMS", "{}"))
         logger.info("Loaded VCS_EXTRA_PARAMS from environment")
 except Exception as e:
     logger.error(f"Error parsing VCS_EXTRA_PARAMS: {str(e)}, using empty dict")
     VCS_EXTRA_PARAMS = {}
-OPENSEARCH_ENDPOINT = os.environ.get("OPENSEARCH_ENDPOINT")
-ENABLE_APM_TOOLS = os.environ.get("ENABLE_APM_TOOLS", "true").lower() == "true"
-APM_TYPE = os.environ.get("APM_TYPE")
-APM_API_KEY = secrets.get("APM_API_KEY") or os.environ.get("APM_API_KEY")
-APM_EXTRA_PARAMS = json.loads(secrets.get("APM_EXTRA_PARAMS", "{}")) or json.loads(os.environ.get("APM_EXTRA_PARAMS", "{}"))
-TICKET_TYPE = os.environ.get("TICKET_TYPE")
-TICKET_PARAMS = json.loads(secrets.get("TICKET_PARAMS", "{}")) or json.loads(os.environ.get("TICKET_PARAMS", "{}"))
-NOTIFICATION_WEBHOOK = secrets.get("NOTIFICATION_WEBHOOK") or os.environ.get("NOTIFICATION_WEBHOOK")
+
+OPENSEARCH_ENDPOINT = get_secret_param("OPENSEARCH_ENDPOINT")
+ENABLE_APM_TOOLS = get_secret_param("ENABLE_APM_TOOLS", "true").lower() == "true"
+APM_TYPE = get_secret_param("APM_TYPE")
+APM_API_KEY = get_secret_param("APM_API_KEY")
+
+# Safely load APM_EXTRA_PARAMS
+APM_EXTRA_PARAMS = {}
+try:
+    apm_extra_raw = get_secret_param("APM_EXTRA_PARAMS")
+    if apm_extra_raw:
+        if isinstance(apm_extra_raw, dict):
+            APM_EXTRA_PARAMS = apm_extra_raw
+            logger.info("Loaded APM_EXTRA_PARAMS as dictionary")
+        else:
+            # Try parsing as JSON string
+            APM_EXTRA_PARAMS = json.loads(apm_extra_raw)
+            logger.info("Loaded APM_EXTRA_PARAMS as JSON string")
+    elif "APM_EXTRA_PARAMS" in os.environ:
+        APM_EXTRA_PARAMS = json.loads(os.environ.get("APM_EXTRA_PARAMS", "{}"))
+        logger.info("Loaded APM_EXTRA_PARAMS from environment")
+except Exception as e:
+    logger.error(f"Error parsing APM_EXTRA_PARAMS: {str(e)}, using empty dict")
+    APM_EXTRA_PARAMS = {}
+
+TICKET_TYPE = get_secret_param("TICKET_TYPE")
+
+# Safely load TICKET_PARAMS
+TICKET_PARAMS = {}
+try:
+    ticket_params_raw = get_secret_param("TICKET_PARAMS")
+    if ticket_params_raw:
+        if isinstance(ticket_params_raw, dict):
+            TICKET_PARAMS = ticket_params_raw
+            logger.info("Loaded TICKET_PARAMS as dictionary")
+        else:
+            # Try parsing as JSON string
+            TICKET_PARAMS = json.loads(ticket_params_raw)
+            logger.info("Loaded TICKET_PARAMS as JSON string")
+    elif "TICKET_PARAMS" in os.environ:
+        TICKET_PARAMS = json.loads(os.environ.get("TICKET_PARAMS", "{}"))
+        logger.info("Loaded TICKET_PARAMS from environment")
+except Exception as e:
+    logger.error(f"Error parsing TICKET_PARAMS: {str(e)}, using empty dict")
+    TICKET_PARAMS = {}
+
+NOTIFICATION_WEBHOOK = get_secret_param("NOTIFICATION_WEBHOOK")
 
 def lambda_handler(event, context):
     """Main Lambda handler"""
@@ -575,7 +607,7 @@ def lambda_handler(event, context):
         
         if action == 'fix_code':
             # Switch to Claude Sonnet for code generation
-            logger.info("Generating code fix")
+            logger.info("Switching from Claude Opus to Claude Sonnet for code generation")
             updated_files = ai_service.generate_code_fix(problem_info, relevant_files, analysis)
             
             if not updated_files:
