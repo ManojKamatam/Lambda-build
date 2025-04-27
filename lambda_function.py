@@ -147,7 +147,11 @@ def lambda_handler(event, context):
     try:
         # Initialize services
         logger.info("Initializing services")
-        vcs_service = VCSService()
+        vcs_service = VCSService(
+        vcs_type=VCS_TYPE, 
+        token=VCS_TOKEN, 
+        **VCS_EXTRA_PARAMS
+        )
         ai_service = AIService(ANTHROPIC_API_KEY)
         opensearch_service = OpenSearchService(OPENSEARCH_ENDPOINT) if OPENSEARCH_ENDPOINT else None
         apm_service = APMService(
