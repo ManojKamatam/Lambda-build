@@ -34,7 +34,7 @@ class OpenSearchService:
                 credentials.access_key,
                 credentials.secret_key,
                 region,
-                'es',
+                'aoss',
                 session_token=credentials.token
             )
             
@@ -57,36 +57,57 @@ class OpenSearchService:
     def create_index_if_not_exists(self):
         """Create the index with proper vector mapping if it doesn't exist"""
         try:
-            if not self.client.indices.exists(index=self.index_name):
-                index_mapping = {
-                    "mappings": {
-                        "properties": {
-                            "vector": {
-                                "type": "knn_vector",
-                                "dimension": self.vector_dimension
-                            },
-                            "type": {"type": "keyword"},
-                            "file_path": {"type": "text", "fields": {"keyword": {"type": "keyword"}}},
-                            "content_sample": {"type": "text"},
-                            "repository": {"type": "keyword"},
-                            "problem_id": {"type": "keyword"},
-                            "timestamp": {"type": "date"}
-                        }
-                    },
-                    "settings": {
-                        "index": {
-                            "knn": True,
-                            "knn.algo_param.ef_search": 100
-                        }
+            # First check if index exists without creating it
+            try:
+                exists = self.client.indices.exists(index=self.index_name)
+                if exists:
+                    logger.info(f"Index {self.index_name} already exists")
+                    return True
+            except Exception as check_error:
+                # If we can't even check if the index exists, log it and continue to creation attempt
+                logger.warning(f"Error checking if index exists: {str(check_error)}")
+                
+            # If not, try to create it
+            index_mapping = {
+                "mappings": {
+                    "properties": {
+                        "vector": {
+                            "type": "knn_vector",
+                            "dimension": self.vector_dimension
+                        },
+                        "type": {"type": "keyword"},
+                        "file_path": {"type": "text", "fields": {"keyword": {"type": "keyword"}}},
+                        "content_sample": {"type": "text"},
+                        "repository": {"type": "keyword"},
+                        "problem_id": {"type": "keyword"},
+                        "timestamp": {"type": "date"}
+                    }
+                },
+                "settings": {
+                    "index": {
+                        "knn": True,
+                        "knn.algo_param.ef_search": 100
                     }
                 }
-                self.client.indices.create(index=self.index_name, body=index_mapping)
-                logger.info(f"Created index {self.index_name} with kNN mapping")
-                return True
-            return False
+            }
+            
+            self.client.indices.create(index=self.index_name, body=index_mapping)
+            logger.info(f"Created index {self.index_name} with kNN mapping")
+            return True
+            
         except Exception as e:
-            logger.error(f"Failed to create index: {str(e)}")
-            return False
+            error_message = str(e)
+            if "AuthorizationException" in error_message or "403" in error_message:
+                logger.warning(f"Authorization issue with OpenSearch: {error_message}. Check IAM permissions and ensure the Lambda role has access to AOSS.")
+                # Still consider the client initialized as other operations might work
+                return False
+            elif "resource_already_exists_exception" in error_message.lower():
+                # Index already exists - this is a common race condition and not an error
+                logger.info(f"Index {self.index_name} already exists (created by another process)")
+                return True
+            else:
+                logger.error(f"Failed to create index: {error_message}")
+                return False
     
     def index_vector(self, doc_id, vector, metadata=None):
         """Index a vector in OpenSearch"""
