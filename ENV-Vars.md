@@ -64,6 +64,3 @@ SECRET_NAME = secret manager name
 TICKET_TYPE = JIRA/ADO
 VCS_TYPE = bitbucket/github
 
-# Further plans
-1) For promt reforms, need to involve bedrock agents
-2) For time saving in searching for relavant files, need to maintain a dynamoDB
