@@ -52,6 +52,8 @@ This is API key not APP key
 
 8. OPENSEARCH_ENDPOINT = ".."
 
+   # check opensearch service whether its connecting with valid index there at your opensearch console or not
+
 # Lambda Environment Varibales
 APM_TYPE = datadog/dynatrace
 BEDROCK_MODEL_ID = amazon.titan-embed-text-v1
