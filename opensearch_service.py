@@ -75,6 +75,7 @@ class OpenSearchService:
                             "type": "knn_vector",
                             "dimension": self.vector_dimension
                         },
+                        "doc_id": {"type": "keyword"}, # Added to store original document ID
                         "type": {"type": "keyword"},
                         "file_path": {"type": "text", "fields": {"keyword": {"type": "keyword"}}},
                         "content_sample": {"type": "text"},
@@ -126,15 +127,17 @@ class OpenSearchService:
             if len(vector) != self.vector_dimension:
                 logger.warning(f"Vector dimension mismatch: expected {self.vector_dimension}, got {len(vector)}")
             
+            # Include doc_id as a field in the document instead of API parameter
             document = {
                 "vector": vector,
+                "doc_id": doc_id,  # Store ID as field in the document
                 **metadata
             }
             
+            # Remove the id parameter from index call
             response = self.client.index(
                 index=self.index_name,
                 body=document,
-                id=doc_id,
                 refresh=True
             )
             return response
@@ -193,34 +196,41 @@ class OpenSearchService:
             return 0
             
         try:
-            # Prepare bulk indexing data
+            # Prepare bulk indexing data - using proper format without _id
             bulk_data = []
             
             for i, (file_path, embedding) in enumerate(zip(file_paths, file_embeddings)):
                 doc_id = f"file_{problem_id}_{i}"
                 content_sample = file_contents.get(file_path, "")[:200] if file_contents else ""
                 
-                # Index action
-                action = {
-                    "_index": self.index_name,
-                    "_id": doc_id,
-                    "_source": {
-                        "vector": list(embedding),  # Ensure it's a list
-                        "type": "file",
-                        "file_path": file_path,
-                        "content_sample": content_sample,
-                        "repository": repository,
-                        "problem_id": problem_id,
-                        "timestamp": time.time()
-                    }
+                # Create document with doc_id as a field
+                document = {
+                    "vector": list(embedding),  # Ensure it's a list
+                    "doc_id": doc_id,  # Store ID as field
+                    "type": "file",
+                    "file_path": file_path,
+                    "content_sample": content_sample,
+                    "repository": repository,
+                    "problem_id": problem_id,
+                    "timestamp": time.time()
                 }
                 
-                bulk_data.append(action)
+                # Use correct bulk format - index operation with no ID
+                bulk_data.append({"index": {"_index": self.index_name}})
+                bulk_data.append(document)
             
             if bulk_data:
-                success, failed = helpers.bulk(self.client, bulk_data, refresh=True, stats_only=True)
-                logger.info(f"Bulk indexed {success} documents, {failed} failed")
-                return success
+                # Execute bulk operation
+                success_count = 0
+                try:
+                    success, failed = helpers.bulk(self.client, bulk_data, refresh=True)
+                    logger.info(f"Bulk indexed {success} documents, {failed} failed")
+                    success_count = success
+                except Exception as bulk_error:
+                    # More detailed error logging
+                    logger.error(f"Error in bulk indexing: {str(bulk_error)}")
+                    
+                return success_count
             return 0
         except Exception as e:
             logger.error(f"Error in bulk indexing: {str(e)}")
