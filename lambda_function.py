@@ -5,6 +5,7 @@ import boto3
 import datetime
 import numpy as np
 import re
+import time
 from opensearch_service import OpenSearchService
 from vcs_service import VCSService
 from apm_service import APMService
@@ -820,7 +821,8 @@ def lambda_handler(event, context):
             ticket_id = ticket_service.create_ticket(
                 f"Investigation Needed: {issue_title}",
                 detailed_description,
-                labels=labels
+                labels=labels,
+                sprint="backlog"  # Explicitly set sprint parameter
             )
             
             # IMPORTANT: Explicitly ensure this ticket is in the backlog by first removing it from any sprint
