@@ -9,7 +9,7 @@ import logging
 logger = logging.getLogger()
 
 class OpenSearchService:
-    def __init__(self, endpoint=None, index_name="ai-response/vectors", vector_dimension=1536):
+    def __init__(self, endpoint=None, index_name="ai-response", vector_dimension=1536):
         self.endpoint = endpoint or os.environ.get("OPENSEARCH_ENDPOINT")
         self.index_name = index_name
         self.vector_dimension = vector_dimension
