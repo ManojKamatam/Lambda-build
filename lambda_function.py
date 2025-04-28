@@ -405,35 +405,6 @@ def lambda_handler(event, context):
             if service_name_from_files:
                 logger.info(f"Updated service name from file analysis: {service_name_from_files}")
                 problem_info['service_names'] = [service_name_from_files]
-        
-        def extract_service_from_files(files):
-            """Try to extract service name from code files"""
-            service_patterns = [
-                r'app\s*=\s*Flask\([\'"]([a-zA-Z0-9_-]+)[\'"]',  # Flask app name
-                r'app_name\s*=\s*[\'"]([a-zA-Z0-9_-]+)[\'"]',  # Generic app name
-                r'service_name\s*=\s*[\'"]([a-zA-Z0-9_-]+)[\'"]',  # Service name variable
-                r'SERVICE_NAME\s*=\s*[\'"]([a-zA-Z0-9_-]+)[\'"]'  # Constant service name
-            ]
-            
-            for file_path, content in files.items():
-                for pattern in service_patterns:
-                    matches = re.findall(pattern, content)
-                    if matches:
-                        return matches[0]
-            
-            # Look for import statements and module names
-            for file_path, content in files.items():
-                if 'app.py' in file_path or 'main.py' in file_path:
-                    # Common Flask/FastAPI pattern
-                    if 'flask' in content.lower():
-                        return 'flask-app'
-                    elif 'fastapi' in content.lower():
-                        return 'fastapi-app'
-                    # Extract based on file name
-                    if '/' in file_path:
-                        return file_path.split('/')[-2] + '-app'
-            
-            return None
 
         # Analyze the problem
         if not relevant_files:
@@ -886,6 +857,34 @@ def lambda_handler(event, context):
         duration = (end_time - start_time).total_seconds()
         logger.info(f"Lambda execution completed in {duration:.2f} seconds")
 
+def extract_service_from_files(files):
+    """Try to extract service name from code files"""
+    service_patterns = [
+        r'app\s*=\s*Flask\([\'"]([a-zA-Z0-9_-]+)[\'"]',  # Flask app name
+        r'app_name\s*=\s*[\'"]([a-zA-Z0-9_-]+)[\'"]',  # Generic app name
+        r'service_name\s*=\s*[\'"]([a-zA-Z0-9_-]+)[\'"]',  # Service name variable
+        r'SERVICE_NAME\s*=\s*[\'"]([a-zA-Z0-9_-]+)[\'"]'  # Constant service name
+    ]
+    
+    for file_path, content in files.items():
+        for pattern in service_patterns:
+            matches = re.findall(pattern, content)
+            if matches:
+                return matches[0]
+    
+    # Look for import statements and module names
+    for file_path, content in files.items():
+        if 'app.py' in file_path or 'main.py' in file_path:
+            # Common Flask/FastAPI pattern
+            if 'flask' in content.lower():
+                return 'flask-app'
+            elif 'fastapi' in content.lower():
+                return 'fastapi-app'
+            # Extract based on file name
+            if '/' in file_path:
+                return file_path.split('/')[-2] + '-app'
+    
+    return None
 def detect_technology(description, service_name):
     """Detect application technology stack from alert description and service name"""
     components = []
