@@ -427,6 +427,19 @@ class AIService:
                         "explanation": response_text,
                         "tool_results": tool_results
                     }
+            else:
+                # Use parse_response helper
+                result = self._parse_response(response_text)
+                result['tool_results'] = tool_results
+                return result
+                    
+        except Exception as e:
+            logger.error(f"Error in follow-up analysis: {str(e)}")
+            return {
+                "action": "needs_more_info", 
+                "explanation": f"Error during analysis with APM data: {str(e)}",
+                "tool_results": tool_results
+            }
     
     def _parse_response(self, response_text):
         """Parse Claude's response to extract decision"""
