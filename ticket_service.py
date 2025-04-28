@@ -305,10 +305,29 @@ class TicketService:
                 return True
         
         return False
+        
     def _add_issue_to_sprint(self, issue_key, sprint_name):
         """Add a Jira issue to a sprint (helper method)"""
         try:
-            # Try to find the sprint by name from cached sprints
+            # If sprint_name is "backlog", ensure the issue is removed from all sprints
+            if sprint_name.lower() == "backlog":
+                # First check if the issue is in any active sprints
+                active_sprints = self._get_jira_active_sprints()
+                for sprint in active_sprints:
+                    try:
+                        # Check if issue is in this sprint
+                        sprint_issues = self.client.sprint_issues(sprint['id'])
+                        if any(issue.key == issue_key for issue in sprint_issues):
+                            # Remove from sprint
+                            self.client.remove_issues_from_sprint(sprint['id'], [issue_key])
+                            logger.info(f"Removed issue {issue_key} from sprint {sprint['name']}")
+                    except Exception as e:
+                        logger.warning(f"Error checking sprint {sprint['name']}: {str(e)}")
+                
+                logger.info(f"Issue {issue_key} is now in the backlog")
+                return True
+            
+            # Regular sprint handling
             sprint_id = None
             
             # Check if we have cached sprints
@@ -345,6 +364,21 @@ class TicketService:
             
             # If sprint found, add the issue to it
             if sprint_id:
+                # First, ensure issue is not in any other sprints
+                active_sprints = self._get_jira_active_sprints()
+                for sprint in active_sprints:
+                    if sprint['id'] != sprint_id:  # Skip the target sprint
+                        try:
+                            # Check if issue is in this sprint
+                            sprint_issues = self.client.sprint_issues(sprint['id'])
+                            if any(issue.key == issue_key for issue in sprint_issues):
+                                # Remove from other sprint
+                                self.client.remove_issues_from_sprint(sprint['id'], [issue_key])
+                                logger.info(f"Removed issue {issue_key} from sprint {sprint['name']}")
+                        except Exception as e:
+                            logger.warning(f"Error checking sprint {sprint['name']}: {str(e)}")
+                
+                # Now add to the target sprint
                 self.client.add_issues_to_sprint(sprint_id, [issue_key])
                 logger.info(f"Added issue {issue_key} to sprint {sprint_name}")
                 return True
@@ -353,7 +387,7 @@ class TicketService:
                 return False
             
         except Exception as e:
-            logger.error(f"Error adding issue to sprint: {e}")
+            logger.error(f"Error managing issue sprint: {e}")
             return False
     
     def _jira_add_comment(self, ticket_id: str, comment: str) -> bool:
