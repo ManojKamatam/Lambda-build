@@ -714,10 +714,24 @@ def lambda_handler(event, context):
             logger.info("Creating ticket based on analysis")
             ticket_details = ai_service.create_ticket_details(problem_info, analysis)
             
+            # Determine if this should go directly to sprint or backlog
+            severity = problem_info.get('severity', '').upper()
+            priority = ticket_details.get('priority', 'MEDIUM').upper()
+            
+            # Only critical/high severity issues or explicitly high priority tickets go to sprint
+            add_to_sprint = (severity in ['CRITICAL', 'HIGH', 'MAJOR'] or 
+                             priority in ['HIGH', 'CRITICAL', 'URGENT'])
+            
+            sprint_label = "current-sprint" if add_to_sprint else "backlog"
+            
+            # Create the ticket with appropriate label
+            labels = ticket_details.get('tags', ['auto-generated'])
+            labels.append(sprint_label)
+            
             ticket_id = ticket_service.create_ticket(
                 ticket_details.get('title', problem_info.get('title', 'Issue from alert')),
                 ticket_details.get('description', 'No description provided'),
-                labels=ticket_details.get('tags', ['auto-generated'])
+                labels=labels
             )
             
             # Add analysis as a comment
@@ -726,33 +740,63 @@ def lambda_handler(event, context):
                 f"AI Analysis:\n\n{analysis.get('explanation', 'No explanation provided')}"
             )
             
+            # Notification includes sprint status
+            sprint_status = "added to current sprint" if add_to_sprint else "added to backlog"
             send_notification(f"AI Created Ticket: {ticket_details.get('title')}", 
-                            f"A ticket has been created for an incident that requires human attention.\n\nTicket ID: {ticket_id}")
+                            f"A ticket has been created for an incident that requires human attention ({sprint_status}).\n\nTicket ID: {ticket_id}")
             
             return {
                 'statusCode': 200,
                 'body': json.dumps({
                     'action': 'ticket_created',
                     'ticket_id': ticket_id,
+                    'add_to_sprint': add_to_sprint,
                     'ticket_details': ticket_details
                 })
             }
             
         else:  # needs_more_info
-            # Create investigation ticket with comprehensive details
+            # Determine if this needs investigation ticket or just notification
+            severity = problem_info.get('severity', '').upper()
+            issue_title = problem_info.get('title', 'Alert')
+            
+            # Check if this is a low-severity common issue
+            is_common_issue = False
+            # Look for common patterns in the explanation
+            common_phrases = [
+                "This is a common occurrence",
+                "This appears to be expected behavior",
+                "This is likely a false positive",
+                "This is a known issue",
+                "This is a transient issue"
+            ]
+            
+            if analysis.get('explanation') and any(phrase.lower() in analysis.get('explanation', '').lower() 
+                                                  for phrase in common_phrases):
+                is_common_issue = True
+            
+            # For low severity common issues, just send notification without ticket
+            if (severity in ['LOW', 'MINOR', 'INFO', 'NORMAL'] and is_common_issue) or (
+                severity in ['NORMAL', 'INFO'] and 'false positive' in analysis.get('explanation', '').lower()):
+                
+                # Just send notification without creating ticket
+                send_notification(f"Common Issue Detected: {issue_title}", 
+                                 f"A common or expected issue was detected that doesn't require immediate attention.\n\n" +
+                                 f"Summary: {analysis.get('explanation', 'No explanation provided')[:200]}...")
+                
+                return {
+                    'statusCode': 200,
+                    'body': json.dumps({
+                        'action': 'notification_only',
+                        'explanation': analysis.get('explanation'),
+                        'reason': 'Common low-severity issue'
+                    })
+                }
+            
+            # Otherwise create investigation ticket with comprehensive details
             logger.info("Creating investigation ticket with comprehensive analysis details")
             
-            # Still generate the analysis summary for logging/debugging purposes
-            analysis_summary = create_analysis_summary(
-                problem_info=problem_info,
-                component_files=component_files,
-                semantic_files={} if component_files else relevant_files,
-                tool_results=analysis.get('tool_results', []),
-                analysis=analysis,
-                relevant_files=relevant_files
-            )
-            
-            # Use the new function to create a more user-friendly ticket description
+            # Use the function to create a more user-friendly ticket description
             detailed_description = create_investigation_ticket_description(
                 problem_info=problem_info,
                 analysis=analysis,
@@ -760,17 +804,17 @@ def lambda_handler(event, context):
                 tool_results=analysis.get('tool_results', [])
             )
             
-            # Log the analysis summary for debugging (but don't include in ticket)
-            logger.debug(f"Analysis summary: {json.dumps(analysis_summary)}")
-            
+            # Always put investigation tickets in backlog, not sprint
             ticket_id = ticket_service.create_ticket(
-                f"Investigation Needed: {problem_info.get('title', 'Alert')}",
+                f"Investigation Needed: {issue_title}",
                 detailed_description,
-                labels=["investigation-needed", "auto-generated", "ai-response"]
+                labels=["investigation-needed", "auto-generated", "ai-response", "backlog"]
             )
             
-            send_notification(f"Investigation Needed: {problem_info.get('title')}", 
-                             f"An alert requires more information for analysis.\n\nTicket ID: {ticket_id}\n\nSummary: {len(relevant_files)} files analyzed, {len(analysis.get('tool_results', []))} APM tools used.")
+            send_notification(f"Investigation Needed: {issue_title}", 
+                             f"An alert requires more information for analysis (added to backlog).\n\n" +
+                             f"Ticket ID: {ticket_id}\n\nSummary: {len(relevant_files)} files analyzed, " + 
+                             f"{len(analysis.get('tool_results', []))} APM tools used.")
             
             return {
                 'statusCode': 200,
@@ -778,7 +822,7 @@ def lambda_handler(event, context):
                     'action': 'needs_more_info',
                     'ticket_id': ticket_id,
                     'needed_info': analysis.get('details', {}).get('needed_info', 'Additional context is required'),
-                    'analysis_summary': analysis_summary
+                    'added_to_sprint': False  # Always false for investigation tickets
                 })
             }
         
