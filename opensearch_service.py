@@ -212,6 +212,17 @@ class OpenSearchService:
         # Try bulk indexing first
         bulk_data = []
         for i, (file_path, embedding) in enumerate(zip(file_paths, file_embeddings)):
+            # Format timestamp as ISO string
+            timestamp = datetime.datetime.now().isoformat()
+            
+            # Create document
+            metadata = {
+                "file_path": path,
+                "repository": repo_name,
+                "request_id": request_id,
+                "content_sample": file_contents[path][:1000] if path in file_contents else "",
+                "timestamp": timestamp  # Always use ISO format string directly
+            }
             document = {
                 "vector": list(embedding),
                 "logical_id": f"file_{problem_id}_{i}",
