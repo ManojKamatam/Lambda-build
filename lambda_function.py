@@ -742,7 +742,7 @@ def lambda_handler(event, context):
             # Create investigation ticket with comprehensive details
             logger.info("Creating investigation ticket with comprehensive analysis details")
             
-            # Get detailed analysis summary
+            # Still generate the analysis summary for logging/debugging purposes
             analysis_summary = create_analysis_summary(
                 problem_info=problem_info,
                 component_files=component_files,
@@ -752,69 +752,16 @@ def lambda_handler(event, context):
                 relevant_files=relevant_files
             )
             
-            # Format detailed description with summary
-            detailed_description = f"""
-            # Investigation Needed: {problem_info.get('title')}
+            # Use the new function to create a more user-friendly ticket description
+            detailed_description = create_investigation_ticket_description(
+                problem_info=problem_info,
+                analysis=analysis,
+                relevant_files=relevant_files,
+                tool_results=analysis.get('tool_results', [])
+            )
             
-            ## Problem Information
-            - **Title**: {problem_info.get('title')}
-            - **Severity**: {problem_info.get('severity')}
-            - **Service**: {', '.join(problem_info.get('service_names', ['Unknown']))}
-            - **Components Detected**: {', '.join(problem_info.get('components', ['None']))}
-            
-            ## Analysis Process
-            
-            ### File Discovery
-            - **Component-based search**: {len(component_files)} files found
-            - **Semantic search**: {'Performed' if not component_files else 'Not needed'} 
-              - Files found: {len(relevant_files) if not component_files else 'N/A'}
-            
-            ### Files Analyzed
-            {', '.join(relevant_files.keys())[:800] + '...' if len(', '.join(relevant_files.keys())) > 800 else ', '.join(relevant_files.keys())}
-            
-            ### APM Tool Usage
-            """
-            
-            # Add tool information
-            if analysis.get('tool_results'):
-                for result in analysis.get('tool_results'):
-                    tool_name = result.get('tool_name', 'unknown_tool')
-                    params = result.get('parameters', {})
-                    detailed_description += f"\n- **{tool_name}** "
-                    detailed_description += f"(service: {params.get('service_name', 'unknown')}, "
-                    
-                    if tool_name == 'get_additional_logs':
-                        detailed_description += f"level: {params.get('log_level', 'ERROR')}, "
-                        detailed_description += f"time range: {params.get('time_range', '1h')}): "
-                    elif tool_name == 'get_service_metrics':
-                        detailed_description += f"metric: {params.get('metric_type', 'unknown')}, "
-                        detailed_description += f"time range: {params.get('time_range', '1h')}): "
-                    
-                    # Check if we got actual data or an error
-                    if isinstance(result.get('result'), list) and result.get('result'):
-                        if tool_name == 'get_additional_logs':
-                            detailed_description += f"\n  - **Result**: {len(result.get('result'))} log entries found"
-                        else:
-                            detailed_description += f"\n  - **Result**: Data retrieved successfully"
-                    else:
-                        detailed_description += f"\n  - **Error**: {str(result.get('result', 'No data returned'))}"
-            else:
-                detailed_description += "\nNo APM tools were used or all attempts failed."
-            
-            # Add AI analysis and needed information
-            detailed_description += f"""
-            
-            ## AI Analysis
-            {analysis.get('explanation')}
-            
-            ## Needed Information
-            {analysis.get('details', {}).get('needed_info', 'Additional context is required')}
-            
-            ## Technical Debug Information
-            ```json
-            {json.dumps(analysis_summary, indent=2)}
-            ```
-            """
+            # Log the analysis summary for debugging (but don't include in ticket)
+            logger.debug(f"Analysis summary: {json.dumps(analysis_summary)}")
             
             ticket_id = ticket_service.create_ticket(
                 f"Investigation Needed: {problem_info.get('title', 'Alert')}",
@@ -1304,6 +1251,100 @@ def filter_files_by_extensions(file_list):
             continue
     
     return filtered_files
+
+def create_investigation_ticket_description(problem_info, analysis, relevant_files, tool_results=None):
+    """Create a concise, actionable ticket description for 'needs_more_info' cases"""
+    
+    # Start with essential problem context
+    description = f"""
+    # Investigation Needed: {problem_info.get('title')}
+    
+    ## Problem Summary
+    - **Service**: {', '.join(problem_info.get('service_names', ['Unknown']))}
+    - **Severity**: {problem_info.get('severity', 'Unknown')}
+    - **Issue**: {problem_info.get('title')}
+    """
+    
+    # Add specific needed information section - make this prominent
+    specific_needs = analysis.get('details', {}).get('needed_info')
+    if specific_needs:
+        description += f"""
+        ## Information Needed ⚠️
+        {specific_needs}
+        """
+    else:
+        # If no specific needs were identified, provide guidance
+        description += """
+        ## Information Needed ⚠️
+        The automated analysis couldn't determine the root cause with available data. 
+        Please provide additional context about:
+        
+        - Recent changes to the affected service
+        - Patterns or timing of the issue occurrence
+        - Related services that might be affected
+        """
+    
+    # Add insight from what we do know (error patterns detected)
+    if tool_results:
+        error_patterns = []
+        error_counts = {}
+        
+        # Extract meaningful error patterns from logs, not the raw data
+        for result in tool_results:
+            if result.get('tool_name') == 'get_additional_logs':
+                logs = result.get('result', [])
+                for log in logs[:5]:  # Limit to first 5 for brevity
+                    if isinstance(log, dict) and 'content' in log:
+                        content = log.get('content', '')
+                        # Extract key error messages, not entire logs
+                        if 'error' in content.lower() or 'exception' in content.lower():
+                            # Get the error message, not the entire stack trace
+                            lines = content.split('\n')
+                            error_line = next((line for line in lines if 'error' in line.lower() or 'exception' in line.lower()), '')
+                            if error_line and len(error_line) > 10:
+                                # Track frequency of this error
+                                if error_line in error_counts:
+                                    error_counts[error_line] += 1
+                                else:
+                                    error_counts[error_line] = 1
+                                    # Only add unique errors to the patterns list
+                                    error_patterns.append(error_line)
+        
+        if error_patterns:
+            description += """
+            ## Key Error Patterns Detected
+            """
+            for pattern in error_patterns[:3]:  # Limit to top 3 errors
+                count = error_counts.get(pattern, 1)
+                count_text = f"({count} occurrences)" if count > 1 else ""
+                description += f"- {pattern} {count_text}\n"
+    
+    # Include analyzed files section - but keep it brief
+    if relevant_files:
+        file_list = list(relevant_files.keys())
+        description += f"""
+        ## Context
+        - {len(file_list)} relevant files were analyzed
+        """
+        
+        if len(file_list) <= 5:
+            description += "- Files: " + ", ".join(file_list)
+        else:
+            # Just list a few key files
+            description += f"- Key files: {', '.join(file_list[:3])} and {len(file_list)-3} others"
+    
+    # Add AI analysis summary - keep it concise
+    if analysis.get('explanation'):
+        explanation = analysis.get('explanation')
+        if len(explanation) > 500:
+            explanation = explanation[:500] + "..."
+            
+        description += f"""
+        ## Initial Analysis
+        {explanation}
+        """
+    
+    return description
 
 def create_analysis_summary(problem_info, component_files, semantic_files, 
                             tool_results, analysis, relevant_files):
