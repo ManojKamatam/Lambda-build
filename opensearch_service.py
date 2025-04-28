@@ -209,29 +209,24 @@ class OpenSearchService:
             logger.warning("OpenSearch client not initialized")
             return 0
             
+        from datetime import datetime
+        
         # Try bulk indexing first
         bulk_data = []
         for i, (file_path, embedding) in enumerate(zip(file_paths, file_embeddings)):
-            # Format timestamp as ISO string
-            timestamp = datetime.datetime.now().isoformat()
+            # Always use ISO format string for timestamps
+            timestamp = datetime.now().isoformat()
             
             # Create document
-            metadata = {
-                "file_path": path,
-                "repository": repo_name,
-                "request_id": request_id,
-                "content_sample": file_contents[path][:1000] if path in file_contents else "",
-                "timestamp": timestamp  # Always use ISO format string directly
-            }
             document = {
                 "vector": list(embedding),
-                "logical_id": f"file_{problem_id}_{i}",
+                "logical_id": f"file_{request_id}_{i}",
                 "type": "file",
                 "file_path": file_path,
                 "content_sample": file_contents.get(file_path, "")[:200] if file_contents else "",
                 "repository": repository,
-                "problem_id": problem_id,
-                "timestamp": time.time()
+                "problem_id": request_id,
+                "timestamp": timestamp  # Using ISO format string directly
             }
             action = {"index": {"_index": self.index_name}}
             bulk_data.append(action)
