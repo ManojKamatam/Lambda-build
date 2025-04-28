@@ -53,6 +53,17 @@ This is API key not APP key
 8. OPENSEARCH_ENDPOINT = ".."
 
    # check opensearch service whether its connecting with valid index there at your opensearch console or not
+   # Also add inline policy {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Effect": "Allow",
+                "Action": "aoss:*",
+                "Resource": "*"
+            }
+        ]
+    }
+   to the lambda exeucution role
 
 # Lambda Environment Varibales
 APM_TYPE = datadog/dynatrace
