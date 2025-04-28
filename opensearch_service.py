@@ -190,81 +190,83 @@ class OpenSearchService:
             return []
     
     def store_file_vectors(self, problem_id, file_paths, file_embeddings, file_contents=None, repository=None):
-        """Store file vectors in bulk - simplified robust approach"""
+        """Store file vectors with individual indexing if bulk fails"""
         if not self.client:
             logger.warning("OpenSearch client not initialized")
             return 0
             
+        # Try bulk indexing first
+        bulk_data = []
+        for i, (file_path, embedding) in enumerate(zip(file_paths, file_embeddings)):
+            document = {
+                "vector": list(embedding),
+                "logical_id": f"file_{problem_id}_{i}",
+                "type": "file",
+                "file_path": file_path,
+                "content_sample": file_contents.get(file_path, "")[:200] if file_contents else "",
+                "repository": repository,
+                "problem_id": problem_id,
+                "timestamp": time.time()
+            }
+            action = {"index": {"_index": self.index_name}}
+            bulk_data.append(action)
+            bulk_data.append(document)
+        
+        # Try bulk first (it's faster)
         try:
-            # Prepare bulk indexing data - simple format without IDs
-            bulk_data = []
-            
-            for i, (file_path, embedding) in enumerate(zip(file_paths, file_embeddings)):
-                # Include logical ID as field instead of document ID
-                logical_id = f"file_{problem_id}_{i}"
-                content_sample = file_contents.get(file_path, "")[:200] if file_contents else ""
+            logger.info(f"Attempting bulk indexing of {len(bulk_data)//2} documents")
+            response = self.client.bulk(body=bulk_data)
+            if 'items' in response:
+                success_count = sum(1 for item in response['items'] if 'error' not in item.get('index', {}))
+                failed_count = len(response['items']) - success_count
+                logger.info(f"Bulk indexed {success_count} documents, {failed_count} failed")
                 
+                # If all succeeded, we're done
+                if failed_count == 0:
+                    return len(bulk_data)//2
+                    
+                # If any failed, fall back to individual indexing for failed ones
+                logger.info("Falling back to individual indexing for failed documents")
+        except Exception as e:
+            logger.error(f"Bulk indexing failed: {str(e)}")
+            success_count = 0
+            failed_count = len(bulk_data)//2
+        
+        # Fall back to individual indexing for reliability
+        if failed_count > 0:
+            individual_successes = 0
+            for i, (file_path, embedding) in enumerate(zip(file_paths, file_embeddings)):
+                # Skip if already succeeded in bulk operation
+                if success_count > 0 and i < success_count:
+                    continue
+                    
                 document = {
                     "vector": list(embedding),
-                    "logical_id": logical_id,  # Store ID as a field
+                    "logical_id": f"file_{problem_id}_{i}",
                     "type": "file",
                     "file_path": file_path,
-                    "content_sample": content_sample,
+                    "content_sample": file_contents.get(file_path, "")[:200] if file_contents else "",
                     "repository": repository,
                     "problem_id": problem_id,
                     "timestamp": time.time()
                 }
                 
-                # Simple action without _id
-                action = {"index": {"_index": self.index_name}}
-                bulk_data.append(action)
-                bulk_data.append(document)
+                # Try up to 3 times to index each document
+                for attempt in range(3):
+                    try:
+                        self.client.index(index=self.index_name, body=document)
+                        individual_successes += 1
+                        break
+                    except Exception as e:
+                        if attempt == 2:  # Last attempt
+                            logger.error(f"Failed to index document {i} after 3 attempts: {str(e)}")
+                        else:
+                            time.sleep(1)  # Brief pause before retry
             
-            if not bulk_data:
-                return 0
-                
-            # Simple retry logic - 3 attempts
-            max_attempts = 3
-            for attempt in range(1, max_attempts + 1):
-                try:
-                    logger.info(f"Bulk indexing attempt {attempt}/{max_attempts} with {len(bulk_data)//2} documents")
-                    response = self.client.bulk(body=bulk_data)
-                    
-                    # Count successes/failures
-                    if 'items' in response:
-                        success_count = sum(1 for item in response['items'] if 'error' not in item.get('index', {}))
-                        failed_count = len(response['items']) - success_count
-                        logger.info(f"Bulk indexed {success_count} documents, {failed_count} failed")
-                        
-                        # If any succeeded or we're out of attempts, return what we have
-                        if success_count > 0 or attempt == max_attempts:
-                            return success_count
-                            
-                        # If everything failed, wait and retry
-                        delay = 2 ** (attempt - 1)  # Simple exponential backoff: 1s, 2s, 4s...
-                        logger.info(f"All documents failed, retrying in {delay}s...")
-                        time.sleep(delay)
-                    else:
-                        logger.warning("Unexpected response format")
-                        return 0
-                        
-                except Exception as e:
-                    logger.error(f"Bulk operation failed: {str(e)}")
-                    
-                    # Last attempt - give up
-                    if attempt == max_attempts:
-                        return 0
-                        
-                    # Otherwise wait and retry
-                    delay = 2 ** (attempt - 1)
-                    logger.info(f"Error occurred, retrying in {delay}s...")
-                    time.sleep(delay)
-            
-            return 0  # Shouldn't reach here, but just in case
-            
-        except Exception as e:
-            logger.error(f"Unexpected error in bulk indexing: {str(e)}")
-            return 0
+            logger.info(f"Individually indexed {individual_successes} additional documents")
+            return success_count + individual_successes
+        
+        return success_count
             
     def delete_problem_vectors(self, problem_id):
         """Delete all vectors associated with a problem"""
