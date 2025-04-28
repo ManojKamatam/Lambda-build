@@ -290,9 +290,9 @@ class TicketService:
                     logger.warning(f"No active sprint found, ticket {ticket_id} remains in backlog")
                     return False
             else:
-                # For backlog, no action needed as tickets start in backlog by default
-                logger.info(f"Ticket {ticket_id} left in backlog as requested")
-                return True
+                # For backlog, ensure it's removed from any sprints
+                result = self._ensure_issue_in_backlog(ticket_id)
+                return result
         
         # For Azure DevOps
         elif self.ticket_type == "ado":
@@ -305,27 +305,42 @@ class TicketService:
                 return True
         
         return False
+    
+    def _ensure_issue_in_backlog(self, issue_key):
+        """Ensure an issue is in the backlog (not in any sprint)"""
+        try:
+            # Check if the issue is in any active sprints
+            active_sprints = self._get_jira_active_sprints()
+            issue_removed = False
+            
+            for sprint in active_sprints:
+                try:
+                    # Check if issue is in this sprint
+                    sprint_issues = self.client.sprint_issues(sprint['id'])
+                    if any(issue.key == issue_key for issue in sprint_issues):
+                        # Remove from sprint
+                        self.client.remove_issues_from_sprint(sprint['id'], [issue_key])
+                        logger.info(f"Removed issue {issue_key} from sprint {sprint['name']}")
+                        issue_removed = True
+                except Exception as e:
+                    logger.warning(f"Error checking sprint {sprint['name']}: {str(e)}")
+            
+            if issue_removed:
+                logger.info(f"Issue {issue_key} moved to backlog")
+            else:
+                logger.info(f"Issue {issue_key} is already in backlog")
+            
+            return True
+        except Exception as e:
+            logger.error(f"Error ensuring issue in backlog: {e}")
+            return False
         
     def _add_issue_to_sprint(self, issue_key, sprint_name):
         """Add a Jira issue to a sprint (helper method)"""
         try:
-            # If sprint_name is "backlog", ensure the issue is removed from all sprints
+            # If sprint_name is "backlog", delegate to _ensure_issue_in_backlog method
             if sprint_name.lower() == "backlog":
-                # First check if the issue is in any active sprints
-                active_sprints = self._get_jira_active_sprints()
-                for sprint in active_sprints:
-                    try:
-                        # Check if issue is in this sprint
-                        sprint_issues = self.client.sprint_issues(sprint['id'])
-                        if any(issue.key == issue_key for issue in sprint_issues):
-                            # Remove from sprint
-                            self.client.remove_issues_from_sprint(sprint['id'], [issue_key])
-                            logger.info(f"Removed issue {issue_key} from sprint {sprint['name']}")
-                    except Exception as e:
-                        logger.warning(f"Error checking sprint {sprint['name']}: {str(e)}")
-                
-                logger.info(f"Issue {issue_key} is now in the backlog")
-                return True
+                return self._ensure_issue_in_backlog(issue_key)
             
             # Regular sprint handling
             sprint_id = None
@@ -362,7 +377,6 @@ class TicketService:
                             sprint_id = sprint.id
                             break
             
-            # If sprint found, add the issue to it
             if sprint_id:
                 # First, ensure issue is not in any other sprints
                 active_sprints = self._get_jira_active_sprints()
@@ -385,7 +399,7 @@ class TicketService:
             else:
                 logger.warning(f"Could not find active sprint named '{sprint_name}', issue remains in backlog")
                 return False
-            
+        
         except Exception as e:
             logger.error(f"Error managing issue sprint: {e}")
             return False
