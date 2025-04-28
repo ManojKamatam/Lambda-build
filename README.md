@@ -71,3 +71,8 @@ If model switching logs are missing, ensure that the Lambda function is logging 
 
 Conclusion
 This system automates error detection, root cause analysis, and code remediation, improving operational efficiency and reducing manual intervention. The integration with multiple services ensures a streamlined workflow for resolving issues.
+
+# Further plans
+1) For promt reforms, need to involve bedrock agents
+2) For time saving in searching for relavant files, need to maintain a dynamoDB
+
