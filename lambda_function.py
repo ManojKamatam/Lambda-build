@@ -720,7 +720,7 @@ def lambda_handler(event, context):
             
             # Only critical/high severity issues or explicitly high priority tickets go to sprint
             add_to_sprint = (severity in ['CRITICAL', 'HIGH', 'MAJOR'] or 
-                             priority in ['HIGH', 'CRITICAL', 'URGENT'])
+                            priority in ['HIGH', 'CRITICAL', 'URGENT'])
             
             sprint_label = "current-sprint" if add_to_sprint else "backlog"
             
@@ -733,6 +733,9 @@ def lambda_handler(event, context):
                 ticket_details.get('description', 'No description provided'),
                 labels=labels
             )
+            
+            # Explicitly add to board/sprint if needed
+            ticket_service.add_to_board(ticket_id, sprint_label)
             
             # Add analysis as a comment
             ticket_service.add_comment(
@@ -754,9 +757,6 @@ def lambda_handler(event, context):
                     'ticket_details': ticket_details
                 })
             }
-
-            sprint_label = "current-sprint" if add_to_sprint else "backlog"
-            ticket_service.add_to_board(ticket_id, sprint_label)
             
         else:  # needs_more_info
             # Determine if this needs investigation ticket or just notification
