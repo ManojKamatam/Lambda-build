@@ -808,16 +808,20 @@ def lambda_handler(event, context):
             )
             
             # Always put investigation tickets in backlog, not sprint
+            labels = ["investigation-needed", "auto-generated", "ai-response", "backlog"]
             ticket_id = ticket_service.create_ticket(
                 f"Investigation Needed: {issue_title}",
                 detailed_description,
-                labels=["investigation-needed", "auto-generated", "ai-response", "backlog"]
+                labels=labels
             )
             
+            # IMPORTANT: Explicitly set this ticket to be in the backlog, not in sprint
+            ticket_service.add_to_board(ticket_id, "backlog")
+            
             send_notification(f"Investigation Needed: {issue_title}", 
-                             f"An alert requires more information for analysis (added to backlog).\n\n" +
-                             f"Ticket ID: {ticket_id}\n\nSummary: {len(relevant_files)} files analyzed, " + 
-                             f"{len(analysis.get('tool_results', []))} APM tools used.")
+                            f"An alert requires more information for analysis (added to backlog).\n\n" +
+                            f"Ticket ID: {ticket_id}\n\nSummary: {len(relevant_files)} files analyzed, " + 
+                            f"{len(analysis.get('tool_results', []))} APM tools used.")
             
             return {
                 'statusCode': 200,
@@ -1064,6 +1068,10 @@ def extract_problem_info(event):
             # Plain description for better embedding
             plain_description = re.sub(r'<[^>]+>', ' ', formatted_desc)
             plain_description = re.sub(r'\s+', ' ', plain_description).strip()
+            # Enhance service name extraction - look for more specific patterns in description
+            service_name = extract_service_from_text(description)
+            if not service_name:
+                service_name = body.get('hostname', 'unknown-service')
             
             problem_info = {
                 'title': body.get('title', f"Alert for {service_name}"),
@@ -1213,6 +1221,25 @@ def extract_problem_info(event):
             'service_names': ['unknown-service'],
             'components': []
         }
+
+def extract_service_from_text(text):
+    """Extract service name from text using patterns"""
+    # Common patterns for service names
+    patterns = [
+        r'service[:\s]+([a-zA-Z0-9_-]+)',
+        r'app[:\s]+([a-zA-Z0-9_-]+)',
+        r'application[:\s]+([a-zA-Z0-9_-]+)',
+        r'([a-zA-Z0-9_-]+)[\s-]service',
+        r'([a-zA-Z0-9_-]+)[\s-]app'
+    ]
+    
+    for pattern in patterns:
+        matches = re.findall(pattern, text.lower())
+        if matches:
+            return matches[0]
+    
+    return None
+    
 # Updated environment variables for generic repository configuration
 REPO_OWNER = os.environ.get("REPO_OWNER") 
 REPO_NAME = os.environ.get("REPO_NAME")
