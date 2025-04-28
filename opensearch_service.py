@@ -217,16 +217,16 @@ class OpenSearchService:
             # Always use ISO format string for timestamps
             timestamp = datetime.now().isoformat()
             
-            # Create document
+            # Create document - FIXED request_id to problem_id
             document = {
                 "vector": list(embedding),
-                "logical_id": f"file_{request_id}_{i}",
+                "logical_id": f"file_{problem_id}_{i}", # Fixed
                 "type": "file",
                 "file_path": file_path,
                 "content_sample": file_contents.get(file_path, "")[:200] if file_contents else "",
                 "repository": repository,
-                "problem_id": request_id,
-                "timestamp": timestamp  # Using ISO format string directly
+                "problem_id": problem_id, # Fixed
+                "timestamp": timestamp
             }
             action = {"index": {"_index": self.index_name}}
             bulk_data.append(action)
