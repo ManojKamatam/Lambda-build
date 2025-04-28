@@ -25,7 +25,7 @@ This is API key not APP key
 
 6. TICKET_PARAMS = {}
 # If JIRA Board
-{"server":"https://username.atlassian.net","username":"jira-account-username","api_token":"api-token","project_key":"Board's scrum project key"}
+{"server":"https://username.atlassian.net","username":"jira-account-username","api_token":"api-token","project_key":"Board's scrum project key","default_board":"SCRUM Board","default_sprint":"SCRUM Sprint 1","assign_to_sprint":true}
 
   # For JIRA server
     JIRA UI > Manage account > Product settings
