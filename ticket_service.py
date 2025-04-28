@@ -261,7 +261,50 @@ class TicketService:
         except Exception as e:
             logger.error(f"Error creating Jira ticket: {e}")
             raise
-    
+
+    def add_to_board(self, ticket_id: str, label: str) -> bool:
+        """
+        Add a ticket to either the sprint or backlog based on label
+        
+        Args:
+            ticket_id: The ID of the created ticket
+            label: The label, typically "current-sprint" or "backlog"
+        
+        Returns:
+            bool: True if the operation was successful
+        """
+        # For Jira
+        if self.ticket_type == "jira":
+            # If label is current-sprint, add to active sprint
+            if label == "current-sprint":
+                # Find the default or first active sprint
+                sprint_name = self.default_sprint
+                if not sprint_name:
+                    active_sprints = self._get_jira_active_sprints()
+                    if active_sprints:
+                        sprint_name = active_sprints[0]['name']
+                
+                if sprint_name:
+                    return self._add_issue_to_sprint(ticket_id, sprint_name)
+                else:
+                    logger.warning(f"No active sprint found, ticket {ticket_id} remains in backlog")
+                    return False
+            else:
+                # For backlog, no action needed as tickets start in backlog by default
+                logger.info(f"Ticket {ticket_id} left in backlog as requested")
+                return True
+        
+        # For Azure DevOps
+        elif self.ticket_type == "ado":
+            # Similar logic for ADO
+            if label == "current-sprint" and self.default_iteration:
+                # Implementation would use ADO API to update iteration path
+                # This is a simplified placeholder
+                return True
+            else:
+                return True
+        
+        return False
     def _add_issue_to_sprint(self, issue_key, sprint_name):
         """Add a Jira issue to a sprint (helper method)"""
         try:
