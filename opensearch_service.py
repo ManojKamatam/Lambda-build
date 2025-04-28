@@ -119,6 +119,20 @@ class OpenSearchService:
             
         if metadata is None:
             metadata = {}
+
+        # Format timestamp properly if present
+        if 'timestamp' in metadata and not isinstance(metadata['timestamp'], str):
+            # Ensure timestamp is in ISO format
+            if isinstance(metadata['timestamp'], (int, float)):
+                # Convert UNIX timestamp to ISO
+                from datetime import datetime
+                metadata['timestamp'] = datetime.fromtimestamp(
+                    metadata['timestamp'] if metadata['timestamp'] < 9999999999 
+                    else metadata['timestamp']/1000
+                ).isoformat()
+            elif hasattr(metadata['timestamp'], 'isoformat'):
+                # If it's already a datetime object
+                metadata['timestamp'] = metadata['timestamp'].isoformat()
         
         try:
             # Validate vector
