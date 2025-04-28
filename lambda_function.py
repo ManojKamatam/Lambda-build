@@ -755,8 +755,8 @@ def lambda_handler(event, context):
                 })
             }
 
-        sprint_label = "current-sprint" if add_to_sprint else "backlog"
-        ticket_service.add_to_board(ticket_id, sprint_label)
+            sprint_label = "current-sprint" if add_to_sprint else "backlog"
+            ticket_service.add_to_board(ticket_id, sprint_label)
             
         else:  # needs_more_info
             # Determine if this needs investigation ticket or just notification
