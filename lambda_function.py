@@ -823,8 +823,13 @@ def lambda_handler(event, context):
                 labels=labels
             )
             
-            # IMPORTANT: Explicitly set this ticket to be in the backlog, not in sprint
+            # IMPORTANT: Explicitly ensure this ticket is in the backlog by first removing it from any sprint
+            # then leaving it in the backlog (don't add to another sprint)
             ticket_service.add_to_board(ticket_id, "backlog")
+            
+            # Note: Additional fix for the contradiction in logs
+            # Add a small delay to ensure operations complete in order
+            time.sleep(0.5)
             
             send_notification(f"Investigation Needed: {issue_title}", 
                             f"An alert requires more information for analysis (added to backlog).\n\n" +
