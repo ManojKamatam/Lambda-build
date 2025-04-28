@@ -405,26 +405,28 @@ class AIService:
             
             response_text = message.content[0].text
             
+            # Sanitize the response_text to remove control characters before parsing JSON
+            response_text = ''.join(ch for ch in response_text if ch >= ' ' or ch in ['\n', '\t', '\r'])
+            
             # Extract JSON using same logic as analyze_problem
             json_match = re.search(r'```json\s*(.*?)\s*```', response_text, re.DOTALL)
             if json_match:
-                decision = json.loads(json_match.group(1))
-                # Add tool results to decision for later use
-                decision['tool_results'] = tool_results
-                return decision
-            else:
-                # Use parse_response helper
-                result = self._parse_response(response_text)
-                result['tool_results'] = tool_results
-                return result
-                
-        except Exception as e:
-            logger.error(f"Error in follow-up analysis: {str(e)}")
-            return {
-                "action": "needs_more_info", 
-                "explanation": f"Error during analysis with APM data: {str(e)}",
-                "tool_results": tool_results
-            }
+                json_text = json_match.group(1)
+                # Additional sanitization for JSON specifically
+                json_text = json_text.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
+                try:
+                    decision = json.loads(json_text)
+                    # Add tool results to decision for later use
+                    decision['tool_results'] = tool_results
+                    return decision
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Failed to parse JSON from Claude response: {str(e)}")
+                    # Fall back to inference
+                    return {
+                        "action": "needs_more_info", 
+                        "explanation": response_text,
+                        "tool_results": tool_results
+                    }
     
     def _parse_response(self, response_text):
         """Parse Claude's response to extract decision"""
