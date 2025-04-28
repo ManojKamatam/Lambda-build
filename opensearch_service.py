@@ -134,11 +134,10 @@ class OpenSearchService:
                 **metadata
             }
             
-            # Remove the id parameter from index call
+            # Remove refresh=true parameter since it's not supported
             response = self.client.index(
                 index=self.index_name,
-                body=document,
-                refresh=True
+                body=document
             )
             return response
         except Exception as e:
@@ -196,7 +195,7 @@ class OpenSearchService:
             return 0
             
         try:
-            # Prepare bulk indexing data - using proper format without _id
+            # Prepare bulk indexing data with correct format
             bulk_data = []
             
             for i, (file_path, embedding) in enumerate(zip(file_paths, file_embeddings)):
@@ -215,17 +214,29 @@ class OpenSearchService:
                     "timestamp": time.time()
                 }
                 
-                # Use correct bulk format - index operation with no ID
-                bulk_data.append({"index": {"_index": self.index_name}})
+                # Use the correct bulk format for OpenSearch
+                # First, add the action metadata
+                action = {"index": {"_index": self.index_name}}
+                bulk_data.append(action)
+                
+                # Then add the document data
                 bulk_data.append(document)
             
             if bulk_data:
-                # Execute bulk operation
+                # Execute bulk operation without refresh parameter
                 success_count = 0
                 try:
-                    success, failed = helpers.bulk(self.client, bulk_data, refresh=True)
-                    logger.info(f"Bulk indexed {success} documents, {failed} failed")
-                    success_count = success
+                    # Use bulk API without refresh parameter
+                    response = self.client.bulk(body=bulk_data)
+                    
+                    # Check for items with errors
+                    if 'items' in response:
+                        success_count = sum(1 for item in response['items'] if 'error' not in item.get('index', {}))
+                        failed_count = len(response['items']) - success_count
+                        logger.info(f"Bulk indexed {success_count} documents, {failed_count} failed")
+                    else:
+                        logger.warning("No items in bulk response")
+                        
                 except Exception as bulk_error:
                     # More detailed error logging
                     logger.error(f"Error in bulk indexing: {str(bulk_error)}")
