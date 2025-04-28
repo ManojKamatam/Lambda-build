@@ -20,8 +20,15 @@ class OpenSearchService:
             return
         
         try:
+            # Clean the endpoint to extract just the hostname
+            host = self.endpoint
+            if host.startswith("https://"):
+                host = host[8:]  # Remove 'https://' prefix
+            if host.startswith("http://"):
+                host = host[7:]  # Remove 'http://' prefix
+                
             # Get AWS credentials
-            region = self.endpoint.split('.')[1] if self.endpoint else 'us-east-1'
+            region = host.split('.')[1] if host else 'us-east-1'
             credentials = boto3.Session().get_credentials()
             self.awsauth = AWS4Auth(
                 credentials.access_key,
@@ -31,9 +38,9 @@ class OpenSearchService:
                 session_token=credentials.token
             )
             
-            # Initialize OpenSearch client
+            # Initialize OpenSearch client with the cleaned host
             self.client = OpenSearch(
-                hosts=[{'host': self.endpoint, 'port': 443}],
+                hosts=[{'host': host, 'port': 443}],
                 http_auth=self.awsauth,
                 use_ssl=True,
                 verify_certs=True,
