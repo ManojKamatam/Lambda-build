@@ -290,102 +290,200 @@ class APMService:
         return response.json().get("logs", [])
 
     def _datadog_get_logs(self, service_name, time_range=None, log_level="ERROR"):
-        """Get logs from Datadog"""
-        # Sanitize service name by removing port/colon
-        if ':' in service_name:
-            clean_service_name = service_name.split(':', 1)[0]
-            logger.info(f"Sanitized service name from {service_name} to {clean_service_name}")
-            service_name = clean_service_name
-            # Parse time_range string if provided in that format
-        if isinstance(time_range, str):
-            end_time = datetime.utcnow()
+        """Get logs from Datadog with improved fallback logic and error diagnostics"""
+        try:
+            # Log Datadog configuration for debugging
+            logger.info(f"Datadog API Key present: {bool(self.api_key)}")
+            logger.info(f"Datadog App Key present: {bool(self.app_key)}")
+            logger.info(f"Using Datadog site: {self.site}")
+            logger.info(f"Base URL: {self.base_url}")
+            logger.info(f"Retrieving logs for service: {service_name}, level: {log_level}")
             
-            # Handle different time formats like "1h", "30m", etc.
-            if time_range.endswith('h'):
-                try:
-                    hours = int(time_range[:-1])
-                    start_time = end_time - timedelta(hours=hours)
-                except ValueError:
-                    start_time = end_time - timedelta(hours=1)
-            elif time_range.endswith('m'):
-                try:
-                    minutes = int(time_range[:-1])
-                    start_time = end_time - timedelta(minutes=minutes)
-                except ValueError:
-                    start_time = end_time - timedelta(hours=1)
-            elif time_range.endswith('d'):
-                try:
-                    days = int(time_range[:-1])
-                    start_time = end_time - timedelta(days=days)
-                except ValueError:
-                    start_time = end_time - timedelta(hours=1)
-            else:
-                # Default to 1 hour if format not recognized
-                start_time = end_time - timedelta(hours=1)
+            # Sanitize service name by removing port/colon
+            if ':' in service_name:
+                clean_service_name = service_name.split(':', 1)[0]
+                logger.info(f"Sanitized service name from {service_name} to {clean_service_name}")
+                service_name = clean_service_name
             
+            # Time range parsing (keeping your existing code)
             # Convert to Unix timestamps in milliseconds for Datadog
-            from_time = int(start_time.timestamp() * 1000)
-            to_time = int(end_time.timestamp() * 1000)
-        # Handle dictionary format
-        elif isinstance(time_range, dict) and "start" in time_range and "end" in time_range:
-            try:
-                # Check if these are timestamps or ISO strings
-                if isinstance(time_range["start"], (int, float)):
-                    from_time = int(time_range["start"] * 1000) if time_range["start"] < 10000000000 else int(time_range["start"])
-                    to_time = int(time_range["end"] * 1000) if time_range["end"] < 10000000000 else int(time_range["end"])
-                else:
-                    # Parse ISO strings
-                    from_time = int(datetime.fromisoformat(time_range["start"].replace('Z', '+00:00')).timestamp() * 1000)
-                    to_time = int(datetime.fromisoformat(time_range["end"].replace('Z', '+00:00')).timestamp() * 1000)
-            except Exception as e:
-                logger.error(f"Error parsing time range: {e}")
-                # Default to last hour
-                end_time = datetime.utcnow()
-                start_time = end_time - timedelta(hours=1)
-                from_time = int(start_time.timestamp() * 1000)
-                to_time = int(end_time.timestamp() * 1000)
-        # Default case
-        else:
             end_time = datetime.utcnow()
             start_time = end_time - timedelta(hours=1)
+            
+            if isinstance(time_range, str):
+                # Handle different time formats like "1h", "30m", etc.
+                if time_range.endswith('h'):
+                    try:
+                        hours = int(time_range[:-1])
+                        start_time = end_time - timedelta(hours=hours)
+                    except ValueError:
+                        logger.warning(f"Invalid time format: {time_range}, using default of 1h")
+                elif time_range.endswith('m'):
+                    try:
+                        minutes = int(time_range[:-1])
+                        start_time = end_time - timedelta(minutes=minutes)
+                    except ValueError:
+                        logger.warning(f"Invalid time format: {time_range}, using default of 1h")
+                elif time_range.endswith('d'):
+                    try:
+                        days = int(time_range[:-1])
+                        start_time = end_time - timedelta(days=days)
+                    except ValueError:
+                        logger.warning(f"Invalid time format: {time_range}, using default of 1h")
+            elif isinstance(time_range, dict) and "start" in time_range and "end" in time_range:
+                try:
+                    # Handle timestamp or ISO format
+                    if isinstance(time_range["start"], (int, float)):
+                        from_time = int(time_range["start"] * 1000) if time_range["start"] < 10000000000 else int(time_range["start"])
+                        to_time = int(time_range["end"] * 1000) if time_range["end"] < 10000000000 else int(time_range["end"])
+                        # Convert back to datetime for logging
+                        start_time = datetime.fromtimestamp(from_time / 1000)
+                        end_time = datetime.fromtimestamp(to_time / 1000)
+                    else:
+                        # Parse ISO strings
+                        start_time = datetime.fromisoformat(time_range["start"].replace('Z', '+00:00'))
+                        end_time = datetime.fromisoformat(time_range["end"].replace('Z', '+00:00'))
+                except Exception as e:
+                    logger.error(f"Error parsing time range: {e}")
+                    # Use default time range
+            
+            # Convert to Unix timestamps in milliseconds for Datadog API
             from_time = int(start_time.timestamp() * 1000)
             to_time = int(end_time.timestamp() * 1000)
+            
+            # Define query strategies to try in sequence for better results
+            query_strategies = [
+                # Primary: Try with service tag
+                {"type": "service", "query": f"service:{service_name} status:{log_level.lower()}"},
+                
+                # If no results, try with host tag
+                {"type": "host", "query": f"host:{service_name} status:{log_level.lower()}"},
+                
+                # Try service name with any log level
+                {"type": "service-any-level", "query": f"service:{service_name}"},
+                
+                # Try host name with any log level
+                {"type": "host-any-level", "query": f"host:{service_name}"}
+            ]
+            
+            # API endpoint for logs
+            url = f"{self.base_url}/api/v2/logs/events"
+            
+            # Try each strategy until we find logs
+            for strategy in query_strategies:
+                logger.info(f"Trying logs query strategy: {strategy['type']} - {strategy['query']}")
+                
+                params = {
+                    "filter[query]": strategy['query'],
+                    "filter[from]": from_time,
+                    "filter[to]": to_time,
+                    "page[limit]": 100,
+                    "sort": "-timestamp"  # Newest first
+                }
+                
+                try:
+                    response = self.session.get(url, params=params)
+                    
+                    # Log response details for debugging
+                    logger.info(f"Response status for {strategy['type']}: {response.status_code}")
+                    
+                    # Check for common errors
+                    if response.status_code == 401:
+                        logger.error("Authentication failed - check API key")
+                        continue
+                    elif response.status_code == 403:
+                        logger.error("Authorization failed - check App key permissions")
+                        continue
+                    elif response.status_code == 429:
+                        logger.error("Rate limit exceeded - pausing and will retry")
+                        time.sleep(2)  # Pause briefly before trying next strategy
+                        continue
+                    elif response.status_code != 200:
+                        logger.error(f"Query failed with HTTP {response.status_code}: {response.text[:200]}...")
+                        continue
+                    
+                    # Process 200 OK response
+                    try:
+                        logs_data = response.json()
+                        logs = logs_data.get("data", [])
+                        
+                        if logs:
+                            logger.info(f"Found {len(logs)} logs with strategy: {strategy['type']}")
+                            return logs
+                        else:
+                            logger.info(f"No logs found with strategy: {strategy['type']}")
+                            
+                    except json.JSONDecodeError as e:
+                        logger.error(f"Error parsing JSON: {e}")
+                        # Try to sanitize response
+                        import re
+                        sanitized_text = re.sub(r'[\x00-\x1F\x7F]', '', response.text)
+                        try:
+                            logs_data = json.loads(sanitized_text)
+                            logs = logs_data.get("data", [])
+                            if logs:
+                                logger.info(f"Found {len(logs)} logs after sanitizing response")
+                                return logs
+                        except Exception as parse_error:
+                            logger.error(f"Failed to parse logs after sanitization: {str(parse_error)}")
+                
+                except Exception as request_error:
+                    logger.error(f"Request error with strategy {strategy['type']}: {str(request_error)}")
+            
+            # If we get here, no logs were found with any strategy
+            logger.warning(f"No logs found for '{service_name}' with any query strategy")
+            return []
+            
+        except Exception as e:
+            logger.error(f"Unexpected error in Datadog logs retrieval: {str(e)}", exc_info=True)
+            return []
+
+    def extract_service_names_from_datadog(body):
+        """Extract service names from Datadog webhook payload with proper prioritization"""
+        service_names = []
         
-        # Build query for Datadog Logs API
-        query = f"service:{service_name} status:{log_level.lower()}"
+        # 1. First priority: Look for service tags (most reliable)
+        if "tags" in body and isinstance(body["tags"], list):
+            for tag in body["tags"]:
+                if isinstance(tag, str) and tag.startswith("service:"):
+                    service = tag.split(":", 1)[1]
+                    if service and service not in service_names:
+                        service_names.append(service)
         
-        # Datadog logs API endpoint - use base_url property from self
-        url = f"{self.base_url}/api/v2/logs/events"
+        # 2. Second priority: Check alertScope for service or host tags
+        if "alertScope" in body and body["alertScope"]:
+            scopes = body["alertScope"].split(",")
+            for scope in scopes:
+                scope = scope.strip()
+                if scope.startswith("service:"):
+                    service = scope.split(":", 1)[1]
+                    if service and service not in service_names:
+                        service_names.append(service)
+                elif scope.startswith("host:"):
+                    host = scope.split(":", 1)[1]
+                    if host and host not in service_names:
+                        service_names.append(host)
         
-        params = {
-            "filter[query]": query,
-            "filter[from]": from_time,
-            "filter[to]": to_time,
-            "page[limit]": 100
-        }
+        # 3. Third priority: Use hostname field
+        if "hostname" in body and body["hostname"]:
+            hostname = body["hostname"]
+            if hostname not in service_names:
+                service_names.append(hostname)
         
-        logger.info(f"Getting Datadog logs for service: {service_name}, level: {log_level}")
-        response = self.session.get(url, params=params)
+        # 4. Last resort: Extract from title/message (least reliable)
+        if not service_names and "title" in body:
+            title = body["title"]
+            # Look for service mentions in the title
+            if "Flask API" in title:
+                service_names.append("flask-api")
+            elif "API" in title:
+                service_names.append("api-service")
+            
+        # Default
+        if not service_names:
+            service_names = ["unknown-service"]
         
-        if response.status_code != 200:
-            raise Exception(f"Failed to get Datadog logs: {response.text}")
-        
-        # Add sanitization of response to handle invalid control characters
-        try:
-            logs_data = response.json()
-            return logs_data.get("data", [])
-        except json.JSONDecodeError as e:
-            logger.error(f"Error parsing Datadog logs response: {e}")
-            # Try to sanitize the response to remove control characters
-            import re
-            sanitized_text = re.sub(r'[\x00-\x1F\x7F]', '', response.text)
-            try:
-                logs_data = json.loads(sanitized_text)
-                logger.info("Successfully parsed logs after sanitizing response")
-                return logs_data.get("data", [])
-            except:
-                logger.error("Failed to parse logs even after sanitization")
-                return []
+        return service_names
     
     def _datadog_get_metrics(self, service_name, metric_type, time_range=None):
         """Get metrics from Datadog with multiple query formats for better success rate"""
