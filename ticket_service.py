@@ -72,11 +72,19 @@ class TicketService:
                 for board in self.client.boards():
                     self.boards[board.name.lower()] = board.id
                     
-                    # If this is our default board, cache its active sprints
                     if board.name.lower() == self.default_board.lower():
-                        for sprint in self.client.sprints(board.id):
-                            if hasattr(sprint, 'state') and sprint.state.upper() == 'ACTIVE':
-                                self.sprints[sprint.name.lower()] = sprint.id
+                        # Log all sprints for debugging
+                        all_sprints = self.client.sprints(board.id)
+                        logger.info(f"Found {len(all_sprints)} total sprints for board {board.name}")
+                        
+                        # Log details of each sprint
+                        for sprint in all_sprints:
+                            sprint_state = getattr(sprint, 'state', 'UNKNOWN')
+                            sprint_name = getattr(sprint, 'name', 'UNNAMED')
+                            logger.info(f"Sprint: {sprint_name}, State: {sprint_state}, ID: {getattr(sprint, 'id', 'NONE')}")
+                            
+                            # Cache ALL sprints, not just active ones
+                            self.sprints[sprint_name.lower()] = sprint.id
                 
                 logger.info(f"Cached {len(self.sprints)} active sprints for board {self.default_board}")
             
@@ -373,11 +381,15 @@ class TicketService:
                 
                 # If board found, look for the sprint
                 if board_id:
-                    sprints = self.client.sprints(board_id)
-                    for sprint in sprints:
-                        if (hasattr(sprint, 'name') and sprint.name.lower() == sprint_name.lower() and
-                            hasattr(sprint, 'state') and sprint.state.upper() == 'ACTIVE'):
+                    all_sprints = self.client.sprints(board_id)
+                    logger.info(f"Found {len(all_sprints)} total sprints")
+                    
+                    for sprint in all_sprints:
+                        if hasattr(sprint, 'name') and sprint.name.lower() == sprint_name.lower():
+                            # Remove the ACTIVE requirement
                             sprint_id = sprint.id
+                            sprint_state = getattr(sprint, 'state', 'UNKNOWN')
+                            logger.info(f"Found sprint {sprint_name} with state {sprint_state}")
                             break
             
             if sprint_id:
