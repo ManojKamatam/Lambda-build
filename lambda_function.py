@@ -1060,7 +1060,7 @@ def get_component_based_files(vcs_service, repo, problem_info, file_list):
     return {path: data["content"] for path, data in sorted_files[:10]}
 
 def extract_problem_info(event):
-    """Extract structured problem info from the event"""
+    """Extract structured problem info from the event with improved service name handling"""
     try:
         # Add diagnostic logging
         logger.info(f"Event type: {type(event).__name__}")
@@ -1076,12 +1076,50 @@ def extract_problem_info(event):
             logger.info("Detected nested Datadog webhook format")
             body = event['body']
             
-            # Extract service name from tags if available
-            service_name = body.get('hostname', 'unknown-service')
-            for tag in body.get('tags', []):
-                if tag.startswith('service:'):
-                    service_name = tag.split(':', 1)[1]
-                    break
+            # Extract service name with proper priority order
+            service_name = None
+            
+            # 1. First priority: Look for service: tags
+            if 'tags' in body and isinstance(body['tags'], list):
+                for tag in body['tags']:
+                    if isinstance(tag, str) and tag.startswith('service:'):
+                        service_name = tag.split(':', 1)[1]
+                        logger.info(f"Found service name in tags: {service_name}")
+                        break
+            
+            # 2. Second priority: Check alertScope for service
+            if not service_name and 'alertScope' in body and body['alertScope']:
+                scopes = body['alertScope'].split(',')
+                for scope in scopes:
+                    scope = scope.strip()
+                    if scope.startswith('service:'):
+                        service_name = scope.split(':', 1)[1]
+                        logger.info(f"Found service name in alertScope: {service_name}")
+                        break
+            
+            # 3. Third priority: Use hostname if available
+            if not service_name and 'hostname' in body and body['hostname']:
+                service_name = body['hostname']
+                logger.info(f"Using hostname as service name: {service_name}")
+            
+            # 4. Fourth priority: Try to extract from description
+            description = body.get('message', body.get('body', 'No details available'))
+            if not service_name:
+                text_service = extract_service_from_text(description)
+                if text_service:
+                    service_name = text_service
+                    logger.info(f"Extracted service name from text: {service_name}")
+            
+            # 5. Final fallback
+            if not service_name:
+                # Try to extract from title
+                title = body.get('title', '')
+                if 'Flask' in title:
+                    service_name = 'flask'
+                    logger.info(f"Using 'flask' extracted from title")
+                else:
+                    service_name = 'unknown-service'
+                    logger.info(f"Using default service name: unknown-service")
             
             # Map severity based on alert type
             severity_mapping = {
@@ -1092,11 +1130,8 @@ def extract_problem_info(event):
             }
             severity = severity_mapping.get(body.get('alert_type', ''), 'MAJOR')
             
-            # Create detailed description
-            description = body.get('message', body.get('body', 'No details available'))
-            
             # Format as list items for HTML parsing
-            formatted_desc = description + f"\n\n<li>Status: {body.get('status', 'Unknown')}</li>"
+            formatted_desc = description + f"\n\n<li>Status: {body.get('alertStatus', body.get('status', 'Unknown'))}</li>"
             formatted_desc += f"<li>Condition: {body.get('alertCondition', body.get('alert_condition', 'Unknown'))}</li>"
             formatted_desc += f"<li>Metric: {body.get('alertMetric', body.get('metric', 'Unknown'))}</li>"
             
@@ -1108,13 +1143,13 @@ def extract_problem_info(event):
             service_components = re.findall(r'([A-Za-z][A-Za-z0-9]*(?:Service|API|App|Module))', message_text)
             components.extend(service_components)
             
+            # Extract specific file paths that might be relevant
+            file_paths = re.findall(r'`?File\s+["\']([^"\']+)["\']', message_text)
+            components.extend([os.path.basename(path) for path in file_paths if path])
+            
             # Plain description for better embedding
             plain_description = re.sub(r'<[^>]+>', ' ', formatted_desc)
             plain_description = re.sub(r'\s+', ' ', plain_description).strip()
-            # Enhance service name extraction - look for more specific patterns in description
-            service_name = extract_service_from_text(description)
-            if not service_name:
-                service_name = body.get('hostname', 'unknown-service')
             
             problem_info = {
                 'title': body.get('title', f"Alert for {service_name}"),
@@ -1143,12 +1178,26 @@ def extract_problem_info(event):
                 if 'alert_type' in body and ('title' in body or 'hostname' in body):
                     logger.info("Detected Datadog webhook in API Gateway format")
                     
-                    # Extract service name from tags if available
-                    service_name = body.get('hostname', 'unknown-service')
-                    for tag in body.get('tags', []):
-                        if tag.startswith('service:'):
-                            service_name = tag.split(':', 1)[1]
-                            break
+                    # Extract service name with proper priority
+                    service_name = None
+                    
+                    # First check tags
+                    if 'tags' in body and isinstance(body['tags'], list):
+                        for tag in body['tags']:
+                            if isinstance(tag, str) and tag.startswith('service:'):
+                                service_name = tag.split(':', 1)[1]
+                                logger.info(f"Found service name in tags: {service_name}")
+                                break
+                    
+                    # Then check hostname
+                    if not service_name and 'hostname' in body:
+                        service_name = body['hostname']
+                        logger.info(f"Using hostname as service name: {service_name}")
+                    
+                    # Fallback
+                    if not service_name:
+                        service_name = 'unknown-service'
+                        logger.info(f"Using default service name: unknown-service")
                     
                     # Process the alert similarly to the nested body format
                     severity_mapping = {
@@ -1266,7 +1315,7 @@ def extract_problem_info(event):
         }
 
 def extract_service_from_text(text):
-    """Extract service name from text using patterns"""
+    """Extract service name from text using patterns with improved filtering"""
     # Common patterns for service names
     patterns = [
         r'service[:\s]+([a-zA-Z0-9_-]+)',
@@ -1276,10 +1325,18 @@ def extract_service_from_text(text):
         r'([a-zA-Z0-9_-]+)[\s-]app'
     ]
     
+    # Words that should not be considered service names (common verbs, etc.)
+    invalid_service_names = [
+        'encountered', 'failed', 'error', 'exception', 'unknown', 
+        'warning', 'critical', 'info', 'debug', 'error'
+    ]
+    
     for pattern in patterns:
         matches = re.findall(pattern, text.lower())
-        if matches:
-            return matches[0]
+        for match in matches:
+            # Filter out invalid service names
+            if match and match not in invalid_service_names:
+                return match
     
     return None
     
