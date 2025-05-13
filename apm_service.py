@@ -290,7 +290,7 @@ class APMService:
         return response.json().get("logs", [])
 
     def _datadog_get_logs(self, service_name, time_range=None, log_level="ERROR"):
-        """Get logs from Datadog with improved fallback logic and error diagnostics"""
+        """Get logs from Datadog with improved fallback logic, error diagnostics, and rate limit handling"""
         try:
             # Log Datadog configuration for debugging
             logger.info(f"Datadog API Key present: {bool(self.api_key)}")
@@ -355,15 +355,12 @@ class APMService:
             query_strategies = [
                 # Primary: Try with service tag
                 {"type": "service", "query": f"service:{service_name} status:{log_level.lower()}"},
-                
-                # If no results, try with host tag
                 {"type": "host", "query": f"host:{service_name} status:{log_level.lower()}"},
-                
-                # Try service name with any log level
-                {"type": "service-any-level", "query": f"service:{service_name}"},
-                
-                # Try host name with any log level
-                {"type": "host-any-level", "query": f"host:{service_name}"}
+                # Try alternative service names too
+                {"type": "alt-service", "query": f"service:{service_name}-app status:{log_level.lower()}"},
+                {"type": "alt-service2", "query": f"service:flask status:{log_level.lower()}"},
+                {"type": "service-any", "query": f"service:{service_name}"},
+                {"type": "host-any", "query": f"host:{service_name}"}
             ]
             
             # API endpoint for logs
@@ -371,64 +368,82 @@ class APMService:
             
             # Try each strategy until we find logs
             for strategy in query_strategies:
-                logger.info(f"Trying logs query strategy: {strategy['type']} - {strategy['query']}")
+                max_retries = 3  # Maximum number of retries for rate limiting
+                retry_count = 0
+                retry_delay = 2  # Base delay in seconds
                 
-                params = {
-                    "filter[query]": strategy['query'],
-                    "filter[from]": from_time,
-                    "filter[to]": to_time,
-                    "page[limit]": 100,
-                    "sort": "-timestamp"  # Newest first
-                }
-                
-                try:
-                    response = self.session.get(url, params=params)
-                    
-                    # Log response details for debugging
-                    logger.info(f"Response status for {strategy['type']}: {response.status_code}")
-                    
-                    # Check for common errors
-                    if response.status_code == 401:
-                        logger.error("Authentication failed - check API key")
-                        continue
-                    elif response.status_code == 403:
-                        logger.error("Authorization failed - check App key permissions")
-                        continue
-                    elif response.status_code == 429:
-                        logger.error("Rate limit exceeded - pausing and will retry")
-                        time.sleep(2)  # Pause briefly before trying next strategy
-                        continue
-                    elif response.status_code != 200:
-                        logger.error(f"Query failed with HTTP {response.status_code}: {response.text[:200]}...")
-                        continue
-                    
-                    # Process 200 OK response
+                while retry_count <= max_retries:
                     try:
-                        logs_data = response.json()
-                        logs = logs_data.get("data", [])
+                        logger.info(f"Trying logs query strategy: {strategy['type']} - {strategy['query']}")
                         
-                        if logs:
-                            logger.info(f"Found {len(logs)} logs with strategy: {strategy['type']}")
-                            return logs
-                        else:
-                            logger.info(f"No logs found with strategy: {strategy['type']}")
-                            
-                    except json.JSONDecodeError as e:
-                        logger.error(f"Error parsing JSON: {e}")
-                        # Try to sanitize response
-                        import re
-                        sanitized_text = re.sub(r'[\x00-\x1F\x7F]', '', response.text)
+                        params = {
+                            "filter[query]": strategy['query'],
+                            "filter[from]": from_time,
+                            "filter[to]": to_time,
+                            "page[limit]": 100,
+                            "sort": "-timestamp"  # Newest first
+                        }
+                        
+                        response = self.session.get(url, params=params)
+                        
+                        # Log response details for debugging
+                        logger.info(f"Response status for {strategy['type']}: {response.status_code}")
+                        
+                        # Check for common errors
+                        if response.status_code == 401:
+                            logger.error("Authentication failed - check API key")
+                            break  # Skip to next strategy
+                        elif response.status_code == 403:
+                            logger.error("Authorization failed - check App key permissions")
+                            break  # Skip to next strategy
+                        elif response.status_code == 429:
+                            # Rate limit handling with exponential backoff
+                            retry_count += 1
+                            if retry_count <= max_retries:
+                                # Calculate wait time with exponential backoff (2, 4, 8 seconds)
+                                wait_time = retry_delay * (2 ** (retry_count - 1))
+                                logger.error(f"Rate limit exceeded - retrying in {wait_time}s (attempt {retry_count}/{max_retries})")
+                                time.sleep(wait_time)
+                                continue  # Retry the same strategy
+                            else:
+                                logger.error(f"Rate limit exceeded - max retries reached for strategy {strategy['type']}")
+                                break  # Skip to next strategy
+                        elif response.status_code != 200:
+                            logger.error(f"Query failed with HTTP {response.status_code}: {response.text[:200]}...")
+                            break  # Skip to next strategy
+                        
+                        # Process 200 OK response
                         try:
-                            logs_data = json.loads(sanitized_text)
+                            logs_data = response.json()
                             logs = logs_data.get("data", [])
+                            
                             if logs:
-                                logger.info(f"Found {len(logs)} logs after sanitizing response")
+                                logger.info(f"Found {len(logs)} logs with strategy: {strategy['type']}")
                                 return logs
-                        except Exception as parse_error:
-                            logger.error(f"Failed to parse logs after sanitization: {str(parse_error)}")
-                
-                except Exception as request_error:
-                    logger.error(f"Request error with strategy {strategy['type']}: {str(request_error)}")
+                            else:
+                                logger.info(f"No logs found with strategy: {strategy['type']}")
+                                break  # Skip to next strategy
+                                
+                        except json.JSONDecodeError as e:
+                            logger.error(f"Error parsing JSON: {e}")
+                            # Try to sanitize response
+                            import re
+                            sanitized_text = re.sub(r'[\x00-\x1F\x7F]', '', response.text)
+                            try:
+                                logs_data = json.loads(sanitized_text)
+                                logs = logs_data.get("data", [])
+                                if logs:
+                                    logger.info(f"Found {len(logs)} logs after sanitizing response")
+                                    return logs
+                                else:
+                                    break  # Skip to next strategy
+                            except Exception as parse_error:
+                                logger.error(f"Failed to parse logs after sanitization: {str(parse_error)}")
+                                break  # Skip to next strategy
+                    
+                    except Exception as request_error:
+                        logger.error(f"Request error with strategy {strategy['type']}: {str(request_error)}")
+                        break  # Skip to next strategy
             
             # If we get here, no logs were found with any strategy
             logger.warning(f"No logs found for '{service_name}' with any query strategy")
@@ -449,6 +464,7 @@ class APMService:
                     service = tag.split(":", 1)[1]
                     if service and service not in service_names:
                         service_names.append(service)
+                        logger.info(f"Found service name in tags: {service}")
         
         # 2. Second priority: Check alertScope for service or host tags
         if "alertScope" in body and body["alertScope"]:
@@ -459,16 +475,19 @@ class APMService:
                     service = scope.split(":", 1)[1]
                     if service and service not in service_names:
                         service_names.append(service)
+                        logger.info(f"Found service name in alertScope: {service}")
                 elif scope.startswith("host:"):
                     host = scope.split(":", 1)[1]
                     if host and host not in service_names:
                         service_names.append(host)
+                        logger.info(f"Found host in alertScope: {host}")
         
         # 3. Third priority: Use hostname field
         if "hostname" in body and body["hostname"]:
             hostname = body["hostname"]
             if hostname not in service_names:
                 service_names.append(hostname)
+                logger.info(f"Using hostname as service name: {hostname}")
         
         # 4. Last resort: Extract from title/message (least reliable)
         if not service_names and "title" in body:
@@ -476,12 +495,15 @@ class APMService:
             # Look for service mentions in the title
             if "Flask API" in title:
                 service_names.append("flask-api")
+                logger.info("Found 'flask-api' in title")
             elif "API" in title:
                 service_names.append("api-service")
+                logger.info("Found 'api-service' in title")
             
         # Default
         if not service_names:
-            service_names = ["unknown-service"]
+            service_names.append("unknown-service")
+            logger.info("No service name found, using default: unknown-service")
         
         return service_names
     
