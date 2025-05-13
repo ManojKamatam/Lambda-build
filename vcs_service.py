@@ -790,26 +790,99 @@ class VCSService:
             return []
     
     def _bitbucket_get_directory_contents(self, repo: str, path: str, ref: str, all_files: List[str]):
-        """Recursively get all files in a Bitbucket directory"""
-        url = f"{self.api_base_url}/repositories/{self.workspace}/{repo}/src/{ref}/{path}"
-        logger.info(f"Bitbucket API request: {url}")
-        response = self.session.get(url)
-        logger.info(f"Bitbucket response status: {response.status_code}")
+        """Recursively get all files in a Bitbucket directory with path normalization"""
+        try:
+            # Normalize path to prevent issues with double slashes
+            normalized_path = path.strip('/')
+            
+            # Build API URL with proper path handling
+            url_path = f"{normalized_path}" if normalized_path else ""
+            url = f"{self.api_base_url}/repositories/{self.workspace}/{repo}/src/{ref}/{url_path}"
+            
+            logger.info(f"Bitbucket API request: {url}")
+            response = self.session.get(url)
+            logger.info(f"Bitbucket response status: {response.status_code}")
+            
+            if response.status_code != 200:
+                logger.error(f"Bitbucket API error ({response.status_code}): {response.text}")
+                return
+            
+            data = response.json()
+            
+            # Track which paths we've already processed to avoid duplicates
+            processed_paths = set()
+            
+            # Process files and directories
+            for item in data.get("values", []):
+                item_path = item.get("path", "")
+                
+                # Skip empty paths
+                if not item_path:
+                    continue
+                    
+                if item["type"] == "commit_file":
+                    # Use the path directly from the API response if it's absolute
+                    if item_path.startswith('/'):
+                        full_path = item_path.lstrip('/')
+                    # If the item path already contains the parent path, use it directly
+                    elif normalized_path and item_path.startswith(normalized_path + '/'):
+                        full_path = item_path
+                    # Normal case: join parent path and item path
+                    elif normalized_path:
+                        full_path = f"{normalized_path}/{item_path}"
+                    else:
+                        full_path = item_path
+                    
+                    # Normalize path to avoid duplicates like "instance/instance/app.db"
+                    full_path = self._normalize_path(full_path)
+                    
+                    # Avoid duplicates
+                    if full_path not in processed_paths:
+                        all_files.append(full_path)
+                        processed_paths.add(full_path)
+                        
+                elif item["type"] == "commit_directory":
+                    # Handle nested directory paths similarly
+                    if item_path.startswith('/'):
+                        dir_path = item_path.lstrip('/')
+                    elif normalized_path and item_path.startswith(normalized_path + '/'):
+                        dir_path = item_path
+                    elif normalized_path:
+                        dir_path = f"{normalized_path}/{item_path}"
+                    else:
+                        dir_path = item_path
+                    
+                    # Normalize path
+                    dir_path = self._normalize_path(dir_path)
+                    
+                    # Avoid duplicate recursion
+                    if dir_path not in processed_paths:
+                        processed_paths.add(dir_path)
+                        # Recursive call with normalized path
+                        self._bitbucket_get_directory_contents(repo, dir_path, ref, all_files)
+        except Exception as e:
+            logger.error(f"Error processing Bitbucket directory {path}: {str(e)}", exc_info=True)
+            
+    def _normalize_path(self, path):
+        """Helper to normalize paths and remove duplication"""
+        # Split path into components
+        parts = path.split('/')
+        result = []
         
-        if response.status_code != 200:
-            logger.error(f"Bitbucket API error: {response.text}")
-            return
+        # Process each part and avoid repetitions
+        for i, part in enumerate(parts):
+            # Skip empty parts
+            if not part:
+                continue
+                
+            # Avoid adding duplicated directory names (instance/instance/...)
+            if i > 0 and part == parts[i-1]:
+                continue
+                
+            result.append(part)
         
-        data = response.json()
-        
-        # Process files
-        for item in data.get("values", []):
-            if item["type"] == "commit_file":
-                full_path = path + "/" + item["path"] if path else item["path"]
-                all_files.append(full_path)
-            elif item["type"] == "commit_directory":
-                dir_path = path + "/" + item["path"] if path else item["path"]
-                self._bitbucket_get_directory_contents(repo, dir_path, ref, all_files)
+        # Rejoin the path
+        return '/'.join(result)
     
     def _bitbucket_get_content(self, repo: str, path: str, ref: str) -> str:
         """Get file content from Bitbucket"""
