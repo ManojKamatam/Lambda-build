@@ -309,40 +309,43 @@ class TicketService:
     def _ensure_issue_in_backlog(self, issue_key):
         """Ensure an issue is in the backlog (not in any sprint)"""
         try:
-            # Check if the issue is in any active sprints
+            # Check if the issue is in any active sprints using JQL search instead of sprint_issues
             active_sprints = self._get_jira_active_sprints()
             issue_removed = False
             
             for sprint in active_sprints:
                 try:
-                    # Check if issue is in this sprint
-                    sprint_issues = self.client.sprint_issues(sprint['id'])
-                    if any(issue.key == issue_key for issue in sprint_issues):
-                        # Remove from sprint
-                        self.client.remove_issues_from_sprint(sprint['id'], [issue_key])
+                    # Get issues in sprint using JQL
+                    sprint_issues_jql = f'sprint = {sprint["id"]} AND key = {issue_key}'
+                    issues_in_sprint = self.client.search_issues(sprint_issues_jql)
+                    
+                    # If the issue is in this sprint, remove it
+                    if issues_in_sprint.total > 0:
+                        self.client.move_to_backlog([issue_key])
                         logger.info(f"Removed issue {issue_key} from sprint {sprint['name']}")
                         issue_removed = True
+                        break  # No need to check other sprints once removed
                 except Exception as e:
                     logger.warning(f"Error checking sprint {sprint['name']}: {str(e)}")
             
-            if issue_removed:
-                logger.info(f"Issue {issue_key} moved to backlog")
-            else:
+            if not issue_removed:
                 logger.info(f"Issue {issue_key} is already in backlog")
             
             return True
         except Exception as e:
             logger.error(f"Error ensuring issue in backlog: {e}")
             return False
-        
+    
     def _add_issue_to_sprint(self, issue_key, sprint_name):
-        """Add a Jira issue to a sprint (helper method)"""
+        """Add a Jira issue to a sprint using proper API calls"""
         try:
-            # If sprint_name is "backlog", delegate to _ensure_issue_in_backlog method
+            # If sprint_name is "backlog", use move_to_backlog method
             if sprint_name.lower() == "backlog":
-                return self._ensure_issue_in_backlog(issue_key)
+                self.client.move_to_backlog([issue_key])
+                logger.info(f"Issue SCRUM-{issue_key} is already in backlog")
+                return True
             
-            # Regular sprint handling
+            # Find sprint ID
             sprint_id = None
             
             # Check if we have cached sprints
@@ -378,19 +381,11 @@ class TicketService:
                             break
             
             if sprint_id:
-                # First, ensure issue is not in any other sprints
-                active_sprints = self._get_jira_active_sprints()
-                for sprint in active_sprints:
-                    if sprint['id'] != sprint_id:  # Skip the target sprint
-                        try:
-                            # Check if issue is in this sprint
-                            sprint_issues = self.client.sprint_issues(sprint['id'])
-                            if any(issue.key == issue_key for issue in sprint_issues):
-                                # Remove from other sprint
-                                self.client.remove_issues_from_sprint(sprint['id'], [issue_key])
-                                logger.info(f"Removed issue {issue_key} from sprint {sprint['name']}")
-                        except Exception as e:
-                            logger.warning(f"Error checking sprint {sprint['name']}: {str(e)}")
+                # Move issue to backlog first to avoid having it in multiple sprints
+                try:
+                    self.client.move_to_backlog([issue_key])
+                except Exception as e:
+                    logger.warning(f"Could not move issue to backlog first (may already be there): {str(e)}")
                 
                 # Now add to the target sprint
                 self.client.add_issues_to_sprint(sprint_id, [issue_key])
