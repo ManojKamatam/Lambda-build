@@ -58,12 +58,14 @@ This is API key not APP key
         "Statement": [
             {
                 "Effect": "Allow",
-                "Action": "aoss:*",
+                "Action": ["aoss:*", "secretsmanager:GetSecretValue"],
                 "Resource": "*"
             }
         ]
     }
    to the lambda exeucution role
+
+   # Create opensearch as ai-response(its hard coded in the code) Also the opensearch collection's data access policy should include the role arn of lambda
 
 # Lambda Environment Varibales
 APM_TYPE = datadog/dynatrace
