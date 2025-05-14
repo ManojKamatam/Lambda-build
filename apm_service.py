@@ -3,7 +3,7 @@ import json
 import os
 import base64
 from datetime import datetime, timedelta
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Union
 import logging
 import time
 import uuid
