@@ -289,110 +289,128 @@ class APMService:
         
         return response.json().get("logs", [])
 
-    def _datadog_get_logs(self, service_name, time_range=None, log_level="ERROR"):
-        """Get logs from Datadog with improved fallback logic, error diagnostics, and rate limit handling"""
-        try:
-            # Log Datadog configuration for debugging
-            logger.info(f"Datadog API Key present: {bool(self.api_key)}")
-            logger.info(f"Datadog App Key present: {bool(self.app_key)}")
-            logger.info(f"Using Datadog site: {self.site}")
-            logger.info(f"Base URL: {self.base_url}")
-            logger.info(f"Retrieving logs for service: {service_name}, level: {log_level}")
+    def _datadog_get_logs(self, service_name: str, time_range: Optional[Union[str, dict]] = None, 
+                     log_level: str = "ERROR") -> List[Dict[str, Any]]:
+        """
+        Retrieve logs from Datadog for a specific service with automatic rate-limit management.
+        
+        This method implements an intelligent fallback strategy to find logs across different
+        service naming patterns while optimizing requests to avoid rate limits.
+        
+        Args:
+            service_name: The name of the service to retrieve logs for
+            time_range: Time range for logs, can be a string like "15m", "1h" or a dict with "start" and "end" keys
+                       (automatically limited to 15 minutes max to prevent rate limiting)
+            log_level: The log level to filter for (ERROR, WARN, INFO, etc.)
             
-            # Sanitize service name by removing port/colon
+        Returns:
+            A list of log entries as dictionaries, or empty list if no logs found or errors occurred
+            
+        Note:
+            This method automatically caps time ranges to 15 minutes to avoid rate limits,
+            and employs multiple fallback strategies to find relevant logs.
+        """
+        request_id = str(uuid.uuid4())[:8]  # Request identifier for tracing
+        logs_found = False
+        
+        try:
+            # Configuration validation and logging
+            if not self.api_key or not self.app_key:
+                logger.error(f"[{request_id}] Missing Datadog credentials - API key: {bool(self.api_key)}, App key: {bool(self.app_key)}")
+                return []
+            
+            logger.info(f"[{request_id}] Retrieving logs for service: {service_name}, level: {log_level}, site: {self.site}")
+            
+            # Input sanitization
+            if not service_name or not isinstance(service_name, str):
+                logger.error(f"[{request_id}] Invalid service name: {type(service_name)}")
+                return []
+                
+            # Sanitize service name by removing port/colon for consistent queries
+            clean_service_name = service_name
             if ':' in service_name:
                 clean_service_name = service_name.split(':', 1)[0]
-                logger.info(f"Sanitized service name from {service_name} to {clean_service_name}")
+                logger.debug(f"[{request_id}] Sanitized service name from {service_name} to {clean_service_name}")
                 service_name = clean_service_name
             
-            # Time range parsing - UPDATED: default to 15 minutes instead of 1 hour to avoid rate limits
+            # Time range calculation with built-in safeguards
             end_time = datetime.utcnow()
-            start_time = end_time - timedelta(minutes=15)  # Default to 15 minutes instead of 1 hour
+            start_time = end_time - timedelta(minutes=15)  # Default: 15-minute window
+            time_window_source = "default"
             
-            if isinstance(time_range, str):
-                # Handle different time formats like "1h", "30m", etc.
-                if time_range.endswith('h'):
-                    try:
-                        hours = int(time_range[:-1])
-                        # Cap to 15 minutes if requested time is too large
-                        if hours > 1:
-                            logger.warning(f"Reduced requested time from {hours}h to 15m to avoid rate limits")
-                            start_time = end_time - timedelta(minutes=15)
-                        else:
-                            start_time = end_time - timedelta(hours=hours)
-                    except ValueError:
-                        logger.warning(f"Invalid time format: {time_range}, using default of 15m")
-                elif time_range.endswith('m'):
-                    try:
-                        minutes = int(time_range[:-1])
-                        # Cap at 15 minutes to avoid rate limits
-                        if minutes > 15:
-                            logger.warning(f"Reduced requested time from {minutes}m to 15m to avoid rate limits")
-                            minutes = 15
-                        start_time = end_time - timedelta(minutes=minutes)
-                    except ValueError:
-                        logger.warning(f"Invalid time format: {time_range}, using default of 15m")
-                elif time_range.endswith('d'):
-                    try:
-                        # For daily requests, use 15 minutes to avoid rate limits
-                        logger.warning(f"Requested {time_range} of logs but limiting to 15m to avoid rate limits")
-                        start_time = end_time - timedelta(minutes=15)
-                    except ValueError:
-                        logger.warning(f"Invalid time format: {time_range}, using default of 15m")
-            elif isinstance(time_range, dict) and "start" in time_range and "end" in time_range:
+            # Process time_range parameter with rate-limit protection
+            if time_range:
                 try:
-                    # Handle timestamp or ISO format
-                    if isinstance(time_range["start"], (int, float)):
-                        from_time = int(time_range["start"] * 1000) if time_range["start"] < 10000000000 else int(time_range["start"])
-                        to_time = int(time_range["end"] * 1000) if time_range["end"] < 10000000000 else int(time_range["end"])
-                        
-                        # Calculate time difference in minutes
-                        start_datetime = datetime.fromtimestamp(from_time / 1000)
-                        end_datetime = datetime.fromtimestamp(to_time / 1000)
-                        minutes_diff = (end_datetime - start_datetime).total_seconds() / 60
-                        
-                        # Cap to 15 minutes if requested time is too large
-                        if minutes_diff > 15:
-                            logger.warning(f"Reduced requested time range from {minutes_diff:.1f}m to 15m to avoid rate limits")
-                            start_time = end_datetime - timedelta(minutes=15)
-                            end_time = end_datetime
+                    if isinstance(time_range, str):
+                        time_window_source = f"string '{time_range}'"
+                        # Parse time string formats (e.g., "15m", "1h", "1d")
+                        if time_range.endswith('h'):
+                            hours = int(time_range[:-1])
+                            if hours > 1:
+                                logger.info(f"[{request_id}] Limiting time window from {hours}h to 15m to prevent rate limits")
+                            else:
+                                start_time = end_time - timedelta(hours=hours)
+                                
+                        elif time_range.endswith('m'):
+                            minutes = int(time_range[:-1])
+                            if minutes > 15:
+                                logger.info(f"[{request_id}] Limiting time window from {minutes}m to 15m to prevent rate limits")
+                            else:
+                                start_time = end_time - timedelta(minutes=minutes)
+                                
+                        elif time_range.endswith('d'):
+                            logger.info(f"[{request_id}] Limiting requested time range from {time_range} to 15m to prevent rate limits")
+                            
+                    elif isinstance(time_range, dict) and "start" in time_range and "end" in time_range:
+                        time_window_source = "dictionary"
+                        # Parse dictionary with start/end timestamps
+                        if isinstance(time_range["start"], (int, float)):
+                            # Timestamps provided as epoch time
+                            start_epoch = time_range["start"]
+                            end_epoch = time_range["end"]
+                            
+                            # Convert to ms if seconds were provided
+                            start_ms = int(start_epoch * 1000) if start_epoch < 10000000000 else int(start_epoch)
+                            end_ms = int(end_epoch * 1000) if end_epoch < 10000000000 else int(end_epoch)
+                            
+                            # Convert to datetime for calculations
+                            start_datetime = datetime.fromtimestamp(start_ms / 1000)
+                            end_datetime = datetime.fromtimestamp(end_ms / 1000)
+                            
                         else:
-                            start_time = start_datetime
-                            end_time = end_datetime
-                    else:
-                        # Parse ISO strings
-                        start_datetime = datetime.fromisoformat(time_range["start"].replace('Z', '+00:00'))
-                        end_datetime = datetime.fromisoformat(time_range["end"].replace('Z', '+00:00'))
-                        minutes_diff = (end_datetime - start_datetime).total_seconds() / 60
+                            # ISO formatted timestamps
+                            start_datetime = datetime.fromisoformat(time_range["start"].replace('Z', '+00:00'))
+                            end_datetime = datetime.fromisoformat(time_range["end"].replace('Z', '+00:00'))
                         
-                        # Cap to 15 minutes if requested time is too large
+                        # Calculate and limit time range
+                        minutes_diff = (end_datetime - start_datetime).total_seconds() / 60
                         if minutes_diff > 15:
-                            logger.warning(f"Reduced requested time range from {minutes_diff:.1f}m to 15m to avoid rate limits")
+                            logger.info(f"[{request_id}] Limiting time window from {minutes_diff:.1f}m to 15m to prevent rate limits")
                             start_time = end_datetime - timedelta(minutes=15)
                             end_time = end_datetime
                         else:
                             start_time = start_datetime
                             end_time = end_datetime
                 except Exception as e:
-                    logger.error(f"Error parsing time range: {e}")
-                    # Use default 15-minute time range
+                    logger.warning(f"[{request_id}] Error parsing time range (using default 15m): {str(e)}")
+                    # Continue with default time window
             
-            # Log the actual time window being used
-            time_window = (end_time - start_time).total_seconds() / 60
-            logger.info(f"Using time window of {time_window:.1f} minutes for log retrieval")
+            # Log the final time window being used
+            time_window_minutes = (end_time - start_time).total_seconds() / 60
+            logger.info(f"[{request_id}] Using {time_window_minutes:.1f} minute time window (source: {time_window_source})")
             
             # Convert to Unix timestamps in milliseconds for Datadog API
             from_time = int(start_time.timestamp() * 1000)
             to_time = int(end_time.timestamp() * 1000)
             
-            # Define query strategies to try in sequence for better results
+            # Define prioritized query strategies to maximize chances of finding logs
             query_strategies = [
-                # Primary: Try with service tag
-                {"type": "service", "query": f"service:{service_name} status:{log_level.lower()}"},
-                {"type": "host", "query": f"host:{service_name} status:{log_level.lower()}"},
-                # Try alternative service names too
-                {"type": "alt-service", "query": f"service:{service_name}-app status:{log_level.lower()}"},
-                {"type": "alt-service2", "query": f"service:flask status:{log_level.lower()}"},
+                # Start with exact matches, then progressively broaden
+                {"type": "service-exact", "query": f"service:{service_name} status:{log_level.lower()}"},
+                {"type": "host-exact", "query": f"host:{service_name} status:{log_level.lower()}"},
+                {"type": "service-app", "query": f"service:{service_name}-app status:{log_level.lower()}"},
+                {"type": "service-flask", "query": f"service:flask status:{log_level.lower()}"},
+                # Last resort - any logs for the service regardless of level
                 {"type": "service-any", "query": f"service:{service_name}"},
                 {"type": "host-any", "query": f"host:{service_name}"}
             ]
@@ -400,18 +418,22 @@ class APMService:
             # API endpoint for logs
             url = f"{self.base_url}/api/v2/logs/events"
             
-            # Reduced page limit to further avoid rate limiting
-            page_limit = 50
+            # Conservative page limit to reduce risk of rate limiting
+            page_limit = 30
             
-            # Try each strategy until we find logs
-            for strategy in query_strategies:
-                max_retries = 3  # Maximum number of retries for rate limiting
+            # Process each strategy with built-in delays to reduce rate limit risk
+            for strategy_index, strategy in enumerate(query_strategies):
+                # Add a small delay between strategies to reduce rate limit risks
+                if strategy_index > 0:
+                    time.sleep(0.5)
+                    
+                max_retries = 3
                 retry_count = 0
                 retry_delay = 2  # Base delay in seconds
                 
                 while retry_count <= max_retries:
                     try:
-                        logger.info(f"Trying logs query strategy: {strategy['type']} - {strategy['query']}")
+                        logger.debug(f"[{request_id}] Trying logs query strategy: {strategy['type']} ({strategy_index+1}/{len(query_strategies)})")
                         
                         params = {
                             "filter[query]": strategy['query'],
@@ -421,73 +443,94 @@ class APMService:
                             "sort": "-timestamp"  # Newest first
                         }
                         
-                        response = self.session.get(url, params=params)
+                        response = self.session.get(
+                            url, 
+                            params=params,
+                            timeout=10  # Add explicit timeout
+                        )
                         
-                        # Log response details for debugging
-                        logger.info(f"Response status for {strategy['type']}: {response.status_code}")
+                        status_code = response.status_code
+                        logger.debug(f"[{request_id}] Response status for {strategy['type']}: {status_code}")
                         
-                        # Check for common errors
-                        if response.status_code == 401:
-                            logger.error("Authentication failed - check API key")
-                            break  # Skip to next strategy
-                        elif response.status_code == 403:
-                            logger.error("Authorization failed - check App key permissions")
-                            break  # Skip to next strategy
-                        elif response.status_code == 429:
+                        # Handle response based on status code
+                        if status_code == 200:
+                            # Success path - process results
+                            try:
+                                logs_data = response.json()
+                                logs = logs_data.get("data", [])
+                                
+                                if logs:
+                                    logs_found = True
+                                    log_count = len(logs)
+                                    logger.info(f"[{request_id}] Found {log_count} logs with strategy: {strategy['type']}")
+                                    return logs
+                                else:
+                                    logger.debug(f"[{request_id}] No logs found with strategy: {strategy['type']}")
+                                    break  # Skip to next strategy
+                                    
+                            except json.JSONDecodeError as e:
+                                logger.warning(f"[{request_id}] Error parsing JSON from Datadog response: {str(e)}")
+                                # Try to sanitize response to handle invalid control characters
+                                try:
+                                    import re
+                                    sanitized_text = re.sub(r'[\x00-\x1F\x7F]', '', response.text)
+                                    logs_data = json.loads(sanitized_text)
+                                    logs = logs_data.get("data", [])
+                                    
+                                    if logs:
+                                        logs_found = True
+                                        logger.info(f"[{request_id}] Found {len(logs)} logs after sanitizing response")
+                                        return logs
+                                    else:
+                                        break  # Skip to next strategy
+                                except Exception as sanitize_error:
+                                    logger.error(f"[{request_id}] Failed to parse logs after sanitization: {str(sanitize_error)}")
+                                    break  # Skip to next strategy
+                        
+                        elif status_code == 401:
+                            logger.error(f"[{request_id}] Authentication failed - check Datadog API key")
+                            return []  # Authentication failure is terminal - stop trying
+                            
+                        elif status_code == 403:
+                            logger.error(f"[{request_id}] Authorization failed - check Datadog App key permissions")
+                            return []  # Authorization failure is terminal - stop trying
+                            
+                        elif status_code == 429:
                             # Rate limit handling with exponential backoff
                             retry_count += 1
                             if retry_count <= max_retries:
                                 # Calculate wait time with exponential backoff (2, 4, 8 seconds)
                                 wait_time = retry_delay * (2 ** (retry_count - 1))
-                                logger.error(f"Rate limit exceeded - retrying in {wait_time}s (attempt {retry_count}/{max_retries})")
+                                logger.warning(f"[{request_id}] Rate limit exceeded - retrying in {wait_time}s (attempt {retry_count}/{max_retries})")
                                 time.sleep(wait_time)
                                 continue  # Retry the same strategy
                             else:
-                                logger.error(f"Rate limit exceeded - max retries reached for strategy {strategy['type']}")
-                                break  # Skip to next strategy
-                        elif response.status_code != 200:
-                            logger.error(f"Query failed with HTTP {response.status_code}: {response.text[:200]}...")
-                            break  # Skip to next strategy
-                        
-                        # Process 200 OK response
-                        try:
-                            logs_data = response.json()
-                            logs = logs_data.get("data", [])
-                            
-                            if logs:
-                                logger.info(f"Found {len(logs)} logs with strategy: {strategy['type']}")
-                                return logs
-                            else:
-                                logger.info(f"No logs found with strategy: {strategy['type']}")
-                                break  # Skip to next strategy
+                                logger.error(f"[{request_id}] Rate limit exceeded - max retries reached for strategy {strategy['type']}")
+                                # Move to next strategy with a longer delay to help rate limits recover
+                                time.sleep(2.0)
+                                break
                                 
-                        except json.JSONDecodeError as e:
-                            logger.error(f"Error parsing JSON: {e}")
-                            # Try to sanitize response
-                            import re
-                            sanitized_text = re.sub(r'[\x00-\x1F\x7F]', '', response.text)
-                            try:
-                                logs_data = json.loads(sanitized_text)
-                                logs = logs_data.get("data", [])
-                                if logs:
-                                    logger.info(f"Found {len(logs)} logs after sanitizing response")
-                                    return logs
-                                else:
-                                    break  # Skip to next strategy
-                            except Exception as parse_error:
-                                logger.error(f"Failed to parse logs after sanitization: {str(parse_error)}")
-                                break  # Skip to next strategy
+                        else:
+                            # Other HTTP errors
+                            logger.warning(f"[{request_id}] Query failed with HTTP {status_code}: {response.text[:200]}...")
+                            break  # Skip to next strategy
                     
+                    except requests.exceptions.Timeout:
+                        logger.warning(f"[{request_id}] Request timeout for strategy {strategy['type']}")
+                        break  # Skip to next strategy
+                        
                     except Exception as request_error:
-                        logger.error(f"Request error with strategy {strategy['type']}: {str(request_error)}")
+                        logger.error(f"[{request_id}] Request error with strategy {strategy['type']}: {str(request_error)}")
                         break  # Skip to next strategy
             
-            # If we get here, no logs were found with any strategy
-            logger.warning(f"No logs found for '{service_name}' with any query strategy")
-            return []
+            # If we exhausted all strategies without finding logs, log a clear message
+            if not logs_found:
+                logger.warning(f"[{request_id}] No logs found for '{service_name}' with log level '{log_level}' after trying all query strategies")
             
+            return []
+                
         except Exception as e:
-            logger.error(f"Unexpected error in Datadog logs retrieval: {str(e)}", exc_info=True)
+            logger.error(f"[{request_id}] Unexpected error in Datadog logs retrieval: {str(e)}", exc_info=True)
             return []
 
     def extract_service_names_from_datadog(body):
