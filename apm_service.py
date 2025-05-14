@@ -305,47 +305,81 @@ class APMService:
                 logger.info(f"Sanitized service name from {service_name} to {clean_service_name}")
                 service_name = clean_service_name
             
-            # Time range parsing (keeping your existing code)
-            # Convert to Unix timestamps in milliseconds for Datadog
+            # Time range parsing - UPDATED: default to 15 minutes instead of 1 hour to avoid rate limits
             end_time = datetime.utcnow()
-            start_time = end_time - timedelta(hours=1)
+            start_time = end_time - timedelta(minutes=15)  # Default to 15 minutes instead of 1 hour
             
             if isinstance(time_range, str):
                 # Handle different time formats like "1h", "30m", etc.
                 if time_range.endswith('h'):
                     try:
                         hours = int(time_range[:-1])
-                        start_time = end_time - timedelta(hours=hours)
+                        # Cap to 15 minutes if requested time is too large
+                        if hours > 1:
+                            logger.warning(f"Reduced requested time from {hours}h to 15m to avoid rate limits")
+                            start_time = end_time - timedelta(minutes=15)
+                        else:
+                            start_time = end_time - timedelta(hours=hours)
                     except ValueError:
-                        logger.warning(f"Invalid time format: {time_range}, using default of 1h")
+                        logger.warning(f"Invalid time format: {time_range}, using default of 15m")
                 elif time_range.endswith('m'):
                     try:
                         minutes = int(time_range[:-1])
+                        # Cap at 15 minutes to avoid rate limits
+                        if minutes > 15:
+                            logger.warning(f"Reduced requested time from {minutes}m to 15m to avoid rate limits")
+                            minutes = 15
                         start_time = end_time - timedelta(minutes=minutes)
                     except ValueError:
-                        logger.warning(f"Invalid time format: {time_range}, using default of 1h")
+                        logger.warning(f"Invalid time format: {time_range}, using default of 15m")
                 elif time_range.endswith('d'):
                     try:
-                        days = int(time_range[:-1])
-                        start_time = end_time - timedelta(days=days)
+                        # For daily requests, use 15 minutes to avoid rate limits
+                        logger.warning(f"Requested {time_range} of logs but limiting to 15m to avoid rate limits")
+                        start_time = end_time - timedelta(minutes=15)
                     except ValueError:
-                        logger.warning(f"Invalid time format: {time_range}, using default of 1h")
+                        logger.warning(f"Invalid time format: {time_range}, using default of 15m")
             elif isinstance(time_range, dict) and "start" in time_range and "end" in time_range:
                 try:
                     # Handle timestamp or ISO format
                     if isinstance(time_range["start"], (int, float)):
                         from_time = int(time_range["start"] * 1000) if time_range["start"] < 10000000000 else int(time_range["start"])
                         to_time = int(time_range["end"] * 1000) if time_range["end"] < 10000000000 else int(time_range["end"])
-                        # Convert back to datetime for logging
-                        start_time = datetime.fromtimestamp(from_time / 1000)
-                        end_time = datetime.fromtimestamp(to_time / 1000)
+                        
+                        # Calculate time difference in minutes
+                        start_datetime = datetime.fromtimestamp(from_time / 1000)
+                        end_datetime = datetime.fromtimestamp(to_time / 1000)
+                        minutes_diff = (end_datetime - start_datetime).total_seconds() / 60
+                        
+                        # Cap to 15 minutes if requested time is too large
+                        if minutes_diff > 15:
+                            logger.warning(f"Reduced requested time range from {minutes_diff:.1f}m to 15m to avoid rate limits")
+                            start_time = end_datetime - timedelta(minutes=15)
+                            end_time = end_datetime
+                        else:
+                            start_time = start_datetime
+                            end_time = end_datetime
                     else:
                         # Parse ISO strings
-                        start_time = datetime.fromisoformat(time_range["start"].replace('Z', '+00:00'))
-                        end_time = datetime.fromisoformat(time_range["end"].replace('Z', '+00:00'))
+                        start_datetime = datetime.fromisoformat(time_range["start"].replace('Z', '+00:00'))
+                        end_datetime = datetime.fromisoformat(time_range["end"].replace('Z', '+00:00'))
+                        minutes_diff = (end_datetime - start_datetime).total_seconds() / 60
+                        
+                        # Cap to 15 minutes if requested time is too large
+                        if minutes_diff > 15:
+                            logger.warning(f"Reduced requested time range from {minutes_diff:.1f}m to 15m to avoid rate limits")
+                            start_time = end_datetime - timedelta(minutes=15)
+                            end_time = end_datetime
+                        else:
+                            start_time = start_datetime
+                            end_time = end_datetime
                 except Exception as e:
                     logger.error(f"Error parsing time range: {e}")
-                    # Use default time range
+                    # Use default 15-minute time range
+            
+            # Log the actual time window being used
+            time_window = (end_time - start_time).total_seconds() / 60
+            logger.info(f"Using time window of {time_window:.1f} minutes for log retrieval")
             
             # Convert to Unix timestamps in milliseconds for Datadog API
             from_time = int(start_time.timestamp() * 1000)
@@ -366,6 +400,9 @@ class APMService:
             # API endpoint for logs
             url = f"{self.base_url}/api/v2/logs/events"
             
+            # Reduced page limit to further avoid rate limiting
+            page_limit = 50
+            
             # Try each strategy until we find logs
             for strategy in query_strategies:
                 max_retries = 3  # Maximum number of retries for rate limiting
@@ -380,7 +417,7 @@ class APMService:
                             "filter[query]": strategy['query'],
                             "filter[from]": from_time,
                             "filter[to]": to_time,
-                            "page[limit]": 100,
+                            "page[limit]": page_limit,
                             "sort": "-timestamp"  # Newest first
                         }
                         
