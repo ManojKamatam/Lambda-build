@@ -342,15 +342,6 @@ class TicketService:
             issue = self.client.create_issue(fields=issue_dict)
             logger.info(f"Created Jira issue {issue.key} - {title}")
             
-            # Add to sprint if specified or configured to do so by default
-            sprint_name = kwargs.get('sprint', self.default_sprint if self.assign_to_sprint else None)
-            
-            if sprint_name:
-                logger.info(f"Attempting to add ticket to sprint: {sprint_name}")
-                self._add_issue_to_sprint(issue.key, sprint_name)
-            else:
-                logger.info(f"Ticket created in backlog (no sprint specified)")
-            
             return issue.key
             
         except Exception as e:
