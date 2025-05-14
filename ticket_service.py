@@ -141,11 +141,84 @@ class TicketService:
     
     def _init_ado(self):
         """Initialize Azure DevOps client with AI section support"""
-        # ... [ADO initialization code remains similar] ...
+        self.organization = self.extra_params.get("organization")
+        self.project = self.extra_params.get("project")
+        self.token = self.extra_params.get("token")
+        
+        # Additional parameters for sprint/iteration support
+        self.default_iteration = self.extra_params.get("default_iteration")
+        self.default_area = self.extra_params.get("default_area")
+        
+        if not all([self.organization, self.project, self.token]):
+            raise ValueError("ADO requires 'organization', 'project', and 'token' parameters")
+        
+        auth = base64.b64encode(f":{self.token}".encode()).decode()
+        self.session = requests.Session()
+        self.session.headers.update({
+            "Authorization": f"Basic {auth}",
+            "Content-Type": "application/json-patch+json"
+        })
+        
+        # Cache work item types and iterations
+        self._cache_ado_metadata()
         
         # Setup area path for AI section if enabled
         if self.ai_section["enabled"]:
             self._ensure_ado_area_path_exists(self.ai_section["ado_area_path"])
+            
+        logger.info(f"Initialized Azure DevOps client for project {self.project}")
+        if self.default_iteration:
+            logger.info(f"Default iteration: {self.default_iteration}")
+            
+    def _cache_ado_metadata(self):
+        """Cache Azure DevOps metadata for faster ticket creation"""
+        try:
+            # Cache work item types
+            response = self.session.get(
+                f"https://dev.azure.com/{self.organization}/{self.project}/_apis/wit/workitemtypes",
+                params={"api-version": "6.0"}
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                self.work_item_types = {}
+                for item in data.get('value', []):
+                    self.work_item_types[item['name'].lower()] = item['referenceName']
+                
+                logger.info(f"Cached {len(self.work_item_types)} work item types from Azure DevOps")
+            
+            # Cache iterations if default is specified
+            if self.default_iteration:
+                response = self.session.get(
+                    f"https://dev.azure.com/{self.organization}/{self.project}/_apis/work/teamsettings/iterations",
+                    params={"api-version": "6.0"}
+                )
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    self.iterations = {}
+                    for item in data.get('value', []):
+                        self.iterations[item['name'].lower()] = item['id']
+                    
+                    logger.info(f"Cached {len(self.iterations)} iterations from Azure DevOps")
+            
+        except Exception as e:
+            logger.warning(f"Error caching Azure DevOps metadata: {str(e)}")
+            # Initialize empty dictionaries if caching fails
+            self.work_item_types = {}
+            self.iterations = {}
+            
+    def _ensure_ado_area_path_exists(self, area_path):
+        """Ensure the specified area path exists in Azure DevOps"""
+        try:
+            # This is a simplified implementation - actual implementation would
+            # involve checking if the area path exists and creating it if needed
+            logger.info(f"Ensuring area path exists: {area_path}")
+            # In a real implementation, you would call the ADO API to create the area path
+            return True
+        except Exception as e:
+            logger.warning(f"Error creating area path: {str(e)}")
+            return False
     
     def create_ticket(self, title: str, description: str, **kwargs) -> Union[str, Dict[str, Any]]:
         """
@@ -504,8 +577,6 @@ class TicketService:
         except Exception as e:
             logger.error(f"Error sending webhook notification: {str(e)}")
             return {"status": "error", "exception": str(e)}
-    
-    # [Rest of the methods remain similar with possible tweaks for enterprise use]
 
     def determine_issue_type(self, title: str, description: str) -> str:
         """Intelligently determine the appropriate issue type based on content"""
@@ -532,3 +603,284 @@ class TicketService:
             return 'Story'  # Common default for Jira
         else:
             return 'Task'   # Common default for Azure DevOps
+            
+    def _jira_create_ticket(self, title: str, description: str, **kwargs) -> str:
+        """Create a ticket in Jira with board/sprint support"""
+        request_id = kwargs.get("request_id", str(uuid.uuid4())[:8])
+        
+        # Prepare issue dictionary
+        issue_dict = {
+            'project': {'key': self.project_key},
+            'summary': title,
+            'description': description,
+            'issuetype': {'name': kwargs.get('issue_type', 'Bug')}
+        }
+        
+        # Add priority with better error handling
+        try:
+            if 'priority' in kwargs:
+                priorities = self.client.priorities()
+                priority_names = [p.name for p in priorities]
+                
+                if kwargs['priority'] in priority_names:
+                    issue_dict['priority'] = {'name': kwargs['priority']}
+                else:
+                    logger.warning(f"[{request_id}] Priority '{kwargs['priority']}' not found")
+        except Exception as e:
+            logger.warning(f"[{request_id}] Could not set priority: {e}")
+        
+        # Add components if provided
+        if 'components' in kwargs and kwargs['components']:
+            issue_dict['components'] = [{'name': c} for c in kwargs['components']]
+        
+        # Add labels if provided
+        if 'labels' in kwargs and kwargs['labels']:
+            issue_dict['labels'] = kwargs['labels']
+        
+        # Create the issue
+        try:
+            issue = self.client.create_issue(fields=issue_dict)
+            logger.info(f"[{request_id}] Created Jira issue {issue.key} - {title}")
+            
+            return issue.key
+            
+        except Exception as e:
+            logger.error(f"[{request_id}] Error creating Jira ticket: {e}")
+            raise
+
+    def _ensure_issue_in_backlog(self, issue_key):
+        """Ensure an issue is in the backlog (not in any sprint)"""
+        try:
+            # Check if the issue is in any active sprints
+            active_sprints = self._get_jira_active_sprints()
+            issue_removed = False
+            
+            for sprint in active_sprints:
+                try:
+                    # Get issues in sprint using JQL
+                    sprint_issues_jql = f'sprint = {sprint["id"]} AND key = {issue_key}'
+                    issues_in_sprint = self.client.search_issues(sprint_issues_jql)
+                    
+                    # If the issue is in this sprint, remove it
+                    if issues_in_sprint.total > 0:
+                        self.client.move_to_backlog([issue_key])
+                        logger.info(f"Removed issue {issue_key} from sprint {sprint['name']}")
+                        issue_removed = True
+                        break
+                except Exception as e:
+                    logger.warning(f"Error checking sprint {sprint['name']}: {str(e)}")
+            
+            if not issue_removed:
+                logger.info(f"Issue {issue_key} is already in backlog")
+            
+            return True
+        except Exception as e:
+            logger.error(f"Error ensuring issue in backlog: {e}")
+            return False
+
+    def _add_issue_to_sprint(self, issue_key, sprint_name):
+        """Add a Jira issue to a sprint"""
+        try:
+            # Handle backlog case
+            if sprint_name.lower() == "backlog":
+                self.client.move_to_backlog([issue_key])
+                logger.info(f"Moved issue {issue_key} to backlog")
+                return True
+            
+            # Find sprint ID from cache or lookup
+            sprint_id = None
+            if hasattr(self, 'sprints') and self.sprints:
+                sprint_id = self.sprints.get(sprint_name.lower())
+            
+            # If not found in cache, search for it
+            if not sprint_id:
+                board_id = None
+                if hasattr(self, 'boards') and self.boards:
+                    board_id = self.boards.get(self.default_board.lower())
+                
+                if board_id:
+                    all_sprints = self.client.sprints(board_id)
+                    for sprint in all_sprints:
+                        if hasattr(sprint, 'name') and sprint.name.lower() == sprint_name.lower():
+                            sprint_id = sprint.id
+                            break
+            
+            if sprint_id:
+                # Move to backlog first to avoid multiple sprint assignments
+                try:
+                    self.client.move_to_backlog([issue_key])
+                except Exception as e:
+                    logger.warning(f"Could not move issue to backlog first: {str(e)}")
+                
+                # Add to target sprint
+                self.client.add_issues_to_sprint(sprint_id, [issue_key])
+                logger.info(f"Added issue {issue_key} to sprint {sprint_name}")
+                return True
+            else:
+                logger.warning(f"Could not find sprint '{sprint_name}', issue remains in backlog")
+                return False
+        
+        except Exception as e:
+            logger.error(f"Error managing issue sprint: {e}")
+            return False
+
+    def add_comment(self, ticket_id: str, comment: str) -> bool:
+        """Add a comment to a ticket"""
+        if self.ticket_type == "jira":
+            return self._jira_add_comment(ticket_id, comment)
+        elif self.ticket_type == "ado":
+            return self._ado_add_comment(ticket_id, comment)
+        return False
+
+    def _jira_add_comment(self, ticket_id: str, comment: str) -> bool:
+        """Add a comment to a Jira ticket"""
+        try:
+            self.client.add_comment(ticket_id, comment)
+            logger.info(f"Added comment to Jira issue {ticket_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Error adding comment to Jira ticket {ticket_id}: {e}")
+            return False
+            
+    def _ado_create_ticket(self, title: str, description: str, **kwargs) -> str:
+        """Create a work item in Azure DevOps"""
+        work_item_type = kwargs.get('work_item_type', 'Bug')
+        
+        document = [
+            {
+                "op": "add",
+                "path": "/fields/System.Title",
+                "value": title
+            },
+            {
+                "op": "add",
+                "path": "/fields/System.Description",
+                "value": description
+            }
+        ]
+        
+        # Add priority if provided
+        if 'priority' in kwargs:
+            priority_mapping = {
+                'critical': 1, 'highest': 1, 'high': 1,
+                'medium': 2, 'normal': 2,
+                'low': 3, 'lowest': 4
+            }
+            
+            priority_text = kwargs['priority'].lower()
+            priority_value = priority_mapping.get(priority_text, 2)
+            
+            document.append({
+                "op": "add",
+                "path": "/fields/Microsoft.VSTS.Common.Priority",
+                "value": priority_value
+            })
+        
+        # Add tags if provided
+        if 'tags' in kwargs:
+            document.append({
+                "op": "add",
+                "path": "/fields/System.Tags",
+                "value": "; ".join(kwargs['tags'])
+            })
+        
+        # Add to iteration if specified
+        iteration = kwargs.get('iteration', self.default_iteration)
+        if iteration:
+            document.append({
+                "op": "add",
+                "path": "/fields/System.IterationPath",
+                "value": f"{self.project}\\{iteration}"
+            })
+        
+        response = self.session.post(
+            f"https://dev.azure.com/{self.organization}/{self.project}/_apis/wit/workitems/${work_item_type}",
+            json=document,
+            params={"api-version": "6.0"}
+        )
+        
+        if response.status_code != 200:
+            error_message = f"Failed to create work item: {response.text}"
+            logger.error(error_message)
+            raise Exception(error_message)
+        
+        return str(response.json()["id"])
+        
+    def _ado_add_comment(self, ticket_id: str, comment: str) -> bool:
+        """Add a comment to an Azure DevOps work item"""
+        try:
+            data = {
+                "text": comment
+            }
+            
+            response = self.session.post(
+                f"https://dev.azure.com/{self.organization}/{self.project}/_apis/wit/workitems/{ticket_id}/comments",
+                json=data,
+                params={"api-version": "6.0-preview.3"}
+            )
+            
+            if response.status_code != 200:
+                logger.warning(f"Failed to add comment: {response.text}")
+                return False
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error adding comment: {e}")
+            return False
+
+    def _get_jira_active_sprints(self):
+        """Get active sprints from Jira"""
+        try:
+            active_sprints = []
+            
+            boards = [b for b in self.client.boards() 
+                     if hasattr(b, 'location') and 
+                     hasattr(b.location, 'projectKey') and 
+                     b.location.projectKey == self.project_key]
+                     
+            for board in boards:
+                for sprint in self.client.sprints(board.id):
+                    if hasattr(sprint, 'state') and sprint.state.upper() == 'ACTIVE':
+                        active_sprints.append({
+                            'id': sprint.id,
+                            'name': sprint.name,
+                            'board_name': board.name
+                        })
+                        
+            return active_sprints
+        except Exception as e:
+            logger.error(f"Error getting active sprints: {e}")
+            return []
+            
+    def get_active_sprints(self):
+        """Get list of all active sprints/iterations"""
+        if self.ticket_type == "jira":
+            return self._get_jira_active_sprints()
+        elif self.ticket_type == "ado":
+            return self._get_ado_active_iterations()
+        return []
+        
+    def _get_ado_active_iterations(self):
+        """Get active iterations from Azure DevOps"""
+        try:
+            active_iterations = []
+            
+            response = self.session.get(
+                f"https://dev.azure.com/{self.organization}/{self.project}/_apis/work/teamsettings/iterations",
+                params={"$timeframe": "current", "api-version": "6.0"}
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                for item in data.get('value', []):
+                    active_iterations.append({
+                        'id': item['id'],
+                        'name': item['name'],
+                        'path': item.get('path', '')
+                    })
+                    
+            return active_iterations
+        except Exception as e:
+            logger.error(f"Error getting active iterations: {e}")
+            return []
