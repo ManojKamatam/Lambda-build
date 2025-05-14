@@ -493,6 +493,98 @@ class TicketService:
         
         # Default to backlog for unknown decision types
         return "backlog"
+
+    def add_to_board(self, ticket_id: str, label: str) -> bool:
+        """
+        Add a ticket to either the sprint or backlog based on label
+        
+        Args:
+            ticket_id: The ID of the created ticket
+            label: The label, typically "current-sprint" or "backlog"
+        
+        Returns:
+            bool: True if the operation was successful
+        """
+        logger.info(f"Explicitly adding ticket {ticket_id} to {label}")
+        
+        # For Jira
+        if self.ticket_type == "jira":
+            # If label is current-sprint, add to active sprint
+            if label == "current-sprint":
+                # Find the default or first active sprint
+                sprint_name = self.default_sprint
+                if not sprint_name:
+                    active_sprints = self._get_jira_active_sprints()
+                    if active_sprints:
+                        sprint_name = active_sprints[0]['name']
+                
+                if sprint_name:
+                    return self._add_issue_to_sprint(ticket_id, sprint_name)
+                else:
+                    logger.warning(f"No active sprint found, ticket {ticket_id} remains in backlog")
+                    return False
+            else:
+                # For backlog, ensure it's removed from any sprints
+                result = self._ensure_issue_in_backlog(ticket_id)
+                return result
+        
+        # For Azure DevOps
+        elif self.ticket_type == "ado":
+            # Similar logic for ADO
+            if label == "current-sprint" and self.default_iteration:
+                # Get the current iteration
+                active_iterations = self._get_ado_active_iterations()
+                if active_iterations:
+                    iteration_path = active_iterations[0].get('path', self.default_iteration)
+                    
+                    # Update the work item's iteration path
+                    document = [
+                        {
+                            "op": "add",
+                            "path": "/fields/System.IterationPath",
+                            "value": iteration_path
+                        }
+                    ]
+                    
+                    response = self.session.patch(
+                        f"https://dev.azure.com/{self.organization}/{self.project}/_apis/wit/workitems/{ticket_id}",
+                        json=document,
+                        params={"api-version": "6.0"}
+                    )
+                    
+                    if response.status_code == 200:
+                        logger.info(f"Added work item {ticket_id} to current iteration")
+                        return True
+                    else:
+                        logger.warning(f"Failed to update iteration path: {response.text}")
+                        return False
+                else:
+                    logger.warning(f"No active iterations found")
+                    return False
+            else:
+                # For backlog in ADO, remove from any iteration
+                document = [
+                    {
+                        "op": "add",
+                        "path": "/fields/System.IterationPath",
+                        "value": self.project  # Root project = backlog
+                    }
+                ]
+                
+                response = self.session.patch(
+                    f"https://dev.azure.com/{self.organization}/{self.project}/_apis/wit/workitems/{ticket_id}",
+                    json=document,
+                    params={"api-version": "6.0"}
+                )
+                
+                if response.status_code == 200:
+                    logger.info(f"Added work item {ticket_id} to backlog")
+                    return True
+                else:
+                    logger.warning(f"Failed to update iteration path: {response.text}")
+                    return False
+        
+        return False
     
     def _send_webhook_notification(self, title: str, description: str, **kwargs) -> Dict[str, Any]:
         """
