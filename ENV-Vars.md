@@ -5,8 +5,13 @@
 1. ANTHROPIC_API_KEY = "sk-ant...."
 2. VCS_TOKEN = "bitbucket - ATB.." or "Github - github_pat_..."
 # If bitbucket
-Bitbucket UI > Personal bitbucket settings > Account Settings [get username of bitbucket]
-                                           > App passwords [Create API key with all appropriate permissions]
+## __📋 Key Findings from Atlassian Community:__
+
+### __1. Authentication Methods Are Different:__
+
+- __REST API__: Use your __Atlassian account EMAIL__ + API token
+- __Git CLI__: Use your __Bitbucket username__ + API token
+
 # If Github
 Github UI > Settings > Developer Settings > Personal Access Tokens > Fine grained tokens [Create a token with appropriate formats]
 
