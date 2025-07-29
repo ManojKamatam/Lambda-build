@@ -12,6 +12,14 @@
 - __REST API__: Use your __Atlassian account EMAIL__ + API token
 - __Git CLI__: Use your __Bitbucket username__ + API token
 
+# Navigation: Atlassian account settings > Security > API Tokens > Token with scopes
+
+Scopes are: 
+read:account
+read:repository:bitbucket
+write:repository:bitbucket
+read:pullrequest:bitbucket
+write:pullrequest:bitbucket
 # If Github
 Github UI > Settings > Developer Settings > Personal Access Tokens > Fine grained tokens [Create a token with appropriate formats]
 
